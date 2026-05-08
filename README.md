@@ -48,7 +48,7 @@ Python packages (installed via pip in a venv or system-wide):
 ## Installation
 Clone the repo:
 ```bash
-git clone https://github.com/YOURUSERNAME/linux-lifepo4-monitor.git
+git clone https://github.com/kbennett2000/linux-lifepo4-monitor.git
 cd linux-lifepo4-monitor
 ```
 
