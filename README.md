@@ -11,9 +11,6 @@ A complete, easy-to-use solution that gives you:
 
 Tested on Ubuntu 24.04 / 22.04.
 
-![Dashboard Preview](screenshot-dashboard.png)
-![Tray Widget Preview](screenshot-tray.png)
-
 ## Features
 
 - Supports **multiple batteries** at the same time
