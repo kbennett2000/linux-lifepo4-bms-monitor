@@ -1,0 +1,17 @@
+# =============================================================================
+# LiFePO4 Battery Monitor - Python Dependencies
+# =============================================================================
+
+# Core Bluetooth Low Energy library
+bleak>=0.21.0
+
+# Library with built-in support for JBD/Jiabaida BMS
+aiobmsble>=0.21.0
+
+# Lightweight web framework for the beautiful dashboard
+flask>=3.0.0
+
+# Optional: If you want to pin exact versions for maximum reproducibility:
+# bleak==0.21.1
+# aiobmsble==0.21.0
+# flask==3.0.3
