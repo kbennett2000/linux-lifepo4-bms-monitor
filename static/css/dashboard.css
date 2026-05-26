@@ -1,0 +1,169 @@
+/* Small companion stylesheet — Tailwind handles the rest. */
+
+:root {
+    color-scheme: light dark;
+}
+
+html, body {
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    -webkit-font-smoothing: antialiased;
+}
+
+/* Subtle background gradient that respects dark mode. */
+body {
+    background-image: radial-gradient(1200px 600px at 50% -200px, rgba(16, 185, 129, 0.08), transparent 60%);
+}
+html.dark body {
+    background-image: radial-gradient(1200px 600px at 50% -200px, rgba(16, 185, 129, 0.12), transparent 60%);
+}
+
+/* Cards */
+.bms-card {
+    background: rgba(255, 255, 255, 0.85);
+    border: 1px solid rgb(226 232 240);
+    border-radius: 1.25rem;
+    padding: 1.5rem;
+    backdrop-filter: blur(8px);
+    transition: transform 0.25s ease, box-shadow 0.25s ease, border-color 0.25s ease;
+    box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+}
+html.dark .bms-card {
+    background: rgba(17, 24, 39, 0.55);
+    border-color: rgb(39 45 58);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
+}
+.bms-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 12px 24px -8px rgba(15, 23, 42, 0.12);
+    border-color: rgb(203 213 225);
+}
+html.dark .bms-card:hover {
+    border-color: rgb(71 85 105);
+    box-shadow: 0 12px 24px -8px rgba(0, 0, 0, 0.5);
+}
+
+/* Summary tiles */
+.summary-tile {
+    background: rgba(255, 255, 255, 0.85);
+    border: 1px solid rgb(226 232 240);
+    border-radius: 1rem;
+    padding: 0.9rem 1.1rem;
+}
+html.dark .summary-tile {
+    background: rgba(17, 24, 39, 0.55);
+    border-color: rgb(39 45 58);
+}
+
+/* SOC ring */
+.soc-ring {
+    --size: 140px;
+    --thickness: 12px;
+    width: var(--size);
+    height: var(--size);
+    position: relative;
+}
+.soc-ring svg {
+    width: 100%;
+    height: 100%;
+    transform: rotate(-90deg);
+}
+.soc-ring .ring-bg {
+    stroke: rgb(226 232 240);
+}
+html.dark .soc-ring .ring-bg {
+    stroke: rgb(39 45 58);
+}
+.soc-ring .ring-fg {
+    transition: stroke-dashoffset 0.7s cubic-bezier(0.4, 0, 0.2, 1), stroke 0.3s ease;
+    stroke-linecap: round;
+}
+.soc-ring .soc-label {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+}
+
+/* Animated value transitions */
+.metric-value {
+    font-variant-numeric: tabular-nums;
+    transition: color 0.2s ease;
+}
+
+/* Cell bars */
+.cell-bar {
+    position: relative;
+    flex: 1;
+    background: rgb(241 245 249);
+    border-radius: 6px;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+    min-width: 0;
+}
+html.dark .cell-bar {
+    background: rgb(30 36 48);
+}
+.cell-bar .fill {
+    background: linear-gradient(180deg, rgb(52 211 153), rgb(16 185 129));
+    transition: height 0.7s cubic-bezier(0.4, 0, 0.2, 1), background 0.3s ease;
+    border-radius: 4px 4px 0 0;
+}
+.cell-bar.is-min .fill {
+    background: linear-gradient(180deg, rgb(251 191 36), rgb(245 158 11));
+}
+.cell-bar.is-max .fill {
+    background: linear-gradient(180deg, rgb(56 189 248), rgb(14 165 233));
+}
+.cell-bar .cell-label {
+    position: absolute;
+    bottom: 4px;
+    left: 0;
+    right: 0;
+    font-size: 10px;
+    text-align: center;
+    color: white;
+    font-variant-numeric: tabular-nums;
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
+    pointer-events: none;
+}
+
+/* Direction badge */
+.dir-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.15rem 0.55rem;
+    border-radius: 999px;
+    font-size: 0.7rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+.dir-charging {
+    background: rgba(16, 185, 129, 0.12);
+    color: rgb(5 150 105);
+}
+html.dark .dir-charging {
+    background: rgba(16, 185, 129, 0.18);
+    color: rgb(52 211 153);
+}
+.dir-discharging {
+    background: rgba(244, 114, 182, 0.12);
+    color: rgb(190 24 93);
+}
+html.dark .dir-discharging {
+    background: rgba(244, 114, 182, 0.18);
+    color: rgb(244 114 182);
+}
+.dir-idle {
+    background: rgba(148, 163, 184, 0.15);
+    color: rgb(71 85 105);
+}
+html.dark .dir-idle {
+    background: rgba(148, 163, 184, 0.15);
+    color: rgb(148 163 184);
+}

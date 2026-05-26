@@ -36,6 +36,11 @@ from aiobmsble.bms.jbd_bms import BMS
 
 import webbrowser   # Used to open the web dashboard when user clicks the button
 
+# Shared config (battery list + dashboard port for the "Open Dashboard" button)
+from bms_config import battery_tuples, load_config
+
+_CONFIG = load_config()
+
 
 class BatteryTray:
     """
@@ -80,13 +85,8 @@ class BatteryTray:
         self.menu.show_all()
         self.indicator.set_menu(self.menu)
 
-        # List of all batteries we want to monitor
-        self.BATTERIES = {
-            "200ah_01": ("A4:C1:37:55:C8:D3", "jbd"),
-            "200ah_02": ("A4:C1:37:55:C2:29", "jbd"),
-            "330ah":    ("A4:C1:37:25:C4:4D", "jbd"),
-            "ecoworthy": ("E2:E7:79:8A:56:A3", "ecoworthy"),
-        }
+        # List of all batteries we want to monitor (from config.json)
+        self.BATTERIES = battery_tuples(_CONFIG)
 
         self.latest_data = {}   # Will hold the most recent data for each battery
 
@@ -221,7 +221,8 @@ class BatteryTray:
 
     def open_dashboard(self):
         """Open the web dashboard in the default browser."""
-        webbrowser.open("http://127.0.0.1:5000")
+        port = _CONFIG.get("server", {}).get("port", 8040)
+        webbrowser.open(f"http://127.0.0.1:{port}")
 
 
 # =============================================================================

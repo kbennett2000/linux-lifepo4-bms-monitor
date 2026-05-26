@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ ui.page_title }}</title>
+
+    <script>
+        // Theme bootstrap — runs before paint so we never flash the wrong theme.
+        (function () {
+            const saved = localStorage.getItem('bms-theme');
+            const sys = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+            const theme = saved || ({{ ui.default_theme | tojson }} === 'system' ? sys : {{ ui.default_theme | tojson }});
+            if (theme === 'dark') document.documentElement.classList.add('dark');
+        })();
+    </script>
+
+    <!-- Tailwind Play CDN: config MUST be set AFTER the script loads. -->
+    <script src="{{ url_for('static', filename='js/tailwind.js') }}"></script>
+    <script>
+        tailwind.config = { darkMode: 'class' };
+    </script>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/dashboard.css') }}">
+
+    <meta name="refresh-seconds" content="{{ ui.refresh_seconds }}">
+    <meta name="header-title" content="{{ ui.header_title }}">
+    <meta name="header-subtitle" content="{{ ui.header_subtitle }}">
+    <meta name="footer-text" content="{{ ui.footer_text }}">
+</head>
+<body class="h-full bg-slate-50 text-slate-900 dark:bg-[#0b0d12] dark:text-slate-100 transition-colors duration-300">
+
+    <div class="max-w-7xl mx-auto px-6 py-10">
+
+        <!-- Header -->
+        <header class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-10">
+            <div>
+                <h1 class="text-3xl sm:text-4xl font-bold tracking-tight bg-clip-text text-transparent
+                           bg-gradient-to-r from-emerald-500 to-teal-400 dark:from-emerald-400 dark:to-teal-300">
+                    {{ ui.header_title }}
+                </h1>
+                <p class="mt-1 text-slate-500 dark:text-slate-400">{{ ui.header_subtitle }}</p>
+            </div>
+
+            <div class="flex items-center gap-3">
+                <div id="status-pill"
+                     class="flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium
+                            bg-white border border-slate-200 text-slate-600
+                            dark:bg-slate-800/60 dark:border-slate-700 dark:text-slate-300">
+                    <span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                    <span id="last-updated">Connecting…</span>
+                </div>
+                <button id="theme-toggle"
+                        class="p-2 rounded-lg border border-slate-200 bg-white text-slate-700 hover:bg-slate-100
+                               dark:border-slate-700 dark:bg-slate-800/60 dark:text-slate-200 dark:hover:bg-slate-700/60
+                               transition-colors"
+                        aria-label="Toggle theme">
+                    <svg id="icon-sun" class="w-5 h-5 hidden dark:block" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M12 3v2m0 14v2M5.6 5.6l1.4 1.4m10 10l1.4 1.4M3 12h2m14 0h2M5.6 18.4l1.4-1.4m10-10l1.4-1.4"/>
+                        <circle cx="12" cy="12" r="4"/>
+                    </svg>
+                    <svg id="icon-moon" class="w-5 h-5 dark:hidden" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+                    </svg>
+                </button>
+            </div>
+        </header>
+
+        <!-- Summary strip -->
+        <section id="summary"
+                 class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-8">
+            <!-- filled by JS -->
+        </section>
+
+        <!-- Battery grid -->
+        <main id="battery-container"
+              class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
+            <!-- filled by JS -->
+        </main>
+
+        <!-- Empty state -->
+        <div id="empty-state" class="hidden text-center py-20">
+            <div class="text-5xl mb-4">🔌</div>
+            <p class="text-slate-500 dark:text-slate-400">Waiting for first battery reading…</p>
+        </div>
+
+        <footer class="mt-12 text-center text-xs text-slate-400 dark:text-slate-600">
+            {{ ui.footer_text }}
+        </footer>
+
+    </div>
+
+    <script src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
+</body>
+</html>

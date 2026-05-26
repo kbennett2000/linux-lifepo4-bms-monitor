@@ -31,17 +31,10 @@ from bleak import BleakScanner, BleakClient
 # aiobmsble contains ready-made support for the common JBD BMS protocol
 from aiobmsble.bms.jbd_bms import BMS
 
-# =============================================================================
-# CONFIGURATION - Edit this section to add/remove your batteries
-# =============================================================================
+# Battery list lives in config.json (shared with dashboard.py and battery_widget.py)
+from bms_config import battery_tuples, load_config
 
-BATTERIES = {
-    # Format: "friendly_name": ("MAC_ADDRESS", "protocol_type")
-    "200ah_01": ("A4:C1:37:55:C8:D3", "jbd"),
-    "200ah_02": ("A4:C1:37:55:C2:29", "jbd"),
-    "330ah":    ("A4:C1:37:25:C4:4D", "jbd"),
-    "ecoworthy": ("E2:E7:79:8A:56:A3", "ecoworthy"),
-}
+BATTERIES = battery_tuples(load_config())
 
 # Global variables to store the latest raw packets from the ECO-WORTHY battery.
 # These are updated by the notification handler and read by the parser.

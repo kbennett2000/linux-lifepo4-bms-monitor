@@ -1,0 +1,2 @@
+[console_scripts]
+aiobmsble = aiobmsble.__main__:main
