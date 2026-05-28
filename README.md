@@ -1,6 +1,15 @@
 # LiFePO4 Battery Monitor for Ubuntu / Linux
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
+[![Platform: Linux](https://img.shields.io/badge/Platform-Linux-informational.svg)](#what-you-need-before-you-start)
+[![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](#contributing)
+
 **Real-time Bluetooth monitoring for JBD-style and ECO-WORTHY LiFePO4 BMS batteries.**
+
+A lightweight, **100% offline** way to keep an eye on the lithium battery banks in your
+**off-grid**, **RV / camper / van**, or **solar** setup — straight from your Ubuntu/Linux
+laptop, desktop, or a headless **Raspberry Pi** server. No app, no cloud, no account.
 
 Three ways to view your battery data:
 
