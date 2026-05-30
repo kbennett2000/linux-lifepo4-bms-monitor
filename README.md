@@ -329,12 +329,24 @@ WorkingDirectory=/home/YOUR_USERNAME/linux-lifepo4-bms-monitor
 ExecStart=/home/YOUR_USERNAME/linux-lifepo4-bms-monitor/venv/bin/python dashboard.py
 Restart=on-failure
 RestartSec=10
+# Allow the dashboard to recover a wedged BLE adapter on its own (see below).
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
 
 [Install]
 WantedBy=multi-user.target
 ```
 
 Save (**Ctrl+O**, **Enter**, **Ctrl+X**).
+
+> **Why the `CAP_NET_ADMIN` lines?** After hours of scanning, some BLE adapters wedge
+> and stop returning devices — historically this needed a manual
+> `sudo systemctl restart bluetooth` or a reboot. The dashboard now detects this and
+> power-cycles the adapter itself, but that requires `CAP_NET_ADMIN` (to talk to the
+> kernel Bluetooth management socket). Without these lines the dashboard still runs and
+> still recovers via a `systemctl restart bluetooth` fallback — but that fallback needs
+> the service to run as **root**, or a passwordless sudoers rule for that one command.
+> Granting the capability to a normal-user service is the cleaner option.
 
 **3. Enable and start it:**
 
@@ -431,6 +443,12 @@ After editing `config.json`, restart the dashboard (or `sudo systemctl restart b
 
 **"InProgress" or "Operation already in progress" errors**
 - The scripts already serialize batteries to avoid this. If it persists: `sudo systemctl restart bluetooth`.
+
+**Some batteries drop off after the dashboard has been running for hours (and only a reboot or `systemctl restart bluetooth` brings them back)**
+- This is a known BLE-on-Linux failure mode: the adapter/BlueZ stack wedges after extended scanning and stops returning some devices.
+- The dashboard now handles this automatically — if a battery misses several consecutive polls it power-cycles the adapter in-process (via `bluetooth-auto-recovery`, falling back to `systemctl restart bluetooth`), and the missing batteries return on their own.
+- Watch it work: `journalctl -u bms-dashboard -f | grep recovery`.
+- If recovery never fires or logs a permission error, the service lacks `CAP_NET_ADMIN` — add the `AmbientCapabilities` lines to the unit file (see *Install as a systemd service*) and `sudo systemctl daemon-reload && sudo systemctl restart bms-dashboard`.
 
 **Tray widget icon is invisible / shows nothing**
 - Run it **outside** the venv: `deactivate && python3 battery_widget.py`.

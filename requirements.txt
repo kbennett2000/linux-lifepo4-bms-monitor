@@ -11,7 +11,14 @@ aiobmsble>=0.21.0
 # Lightweight web framework for the beautiful dashboard
 flask>=3.0.0
 
+# Recovers a wedged BLE adapter in-process (power-cycles the controller) when it
+# stops responding after hours of scanning, instead of needing a manual
+# `systemctl restart bluetooth` / reboot. Pulls in bluetooth-adapters, which we
+# also use to discover the adapter's hci index + MAC.
+bluetooth-auto-recovery>=1.6.0
+
 # Optional: If you want to pin exact versions for maximum reproducibility:
 # bleak==0.21.1
 # aiobmsble==0.21.0
 # flask==3.0.3
+# bluetooth-auto-recovery==1.6.4

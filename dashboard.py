@@ -17,6 +17,7 @@ Author: Kris Bennett (May 2026)
 
 import argparse
 import asyncio
+import subprocess
 import threading
 import time
 
@@ -26,6 +27,16 @@ from bleak import BleakClient, BleakScanner
 from aiobmsble.bms.jbd_bms import BMS
 
 from bms_config import battery_tuples, load_config
+
+# Optional in-process BLE-adapter recovery. If the dependency isn't installed we
+# fall back to `systemctl restart bluetooth`, so the dashboard still runs without
+# it (e.g. before the deps are refreshed on the server).
+try:
+    from bluetooth_auto_recovery import recover_adapter
+    from bluetooth_adapters import get_adapters_from_hci
+except ImportError:  # pragma: no cover - exercised only on under-provisioned hosts
+    recover_adapter = None
+    get_adapters_from_hci = None
 
 
 CONFIG = load_config()
@@ -41,6 +52,16 @@ STALE_AFTER_MISSES = 1
 # Attempts per battery within a single cycle before it counts as a miss. One retry
 # absorbs the common case of a single dropped BLE scan / missed advertisement.
 FETCH_ATTEMPTS = 2
+
+# When a battery has missed this many *consecutive* cycles, the BLE adapter itself
+# has likely wedged (BlueZ/HCI stops returning advertisements after hours of
+# scanning). At that point no amount of Python retrying helps — the adapter must be
+# power-cycled. Set high enough to rule out an ordinary transient miss.
+RECOVER_AFTER_MISSES = 3
+
+# Don't attempt adapter recovery more than once per this many seconds, so a battery
+# that is genuinely offline (e.g. removed) can't trigger a power-cycle every cycle.
+RECOVER_COOLDOWN_SECONDS = 300
 
 app = Flask(__name__, static_folder="static", template_folder="templates")
 
@@ -140,11 +161,71 @@ def _fetch_with_retry(loop, name, addr, proto, attempts=FETCH_ATTEMPTS):
     return None
 
 
+def _resolve_adapter():
+    """Best-effort discovery of the BLE adapter's (hci_index, mac) for recovery.
+
+    Returns (0, None) if the helper library is unavailable or discovery fails;
+    recover_adapter tolerates an unknown MAC, and hci0 is the near-universal default.
+    """
+    if get_adapters_from_hci is None:
+        return 0, None
+    try:
+        adapters = get_adapters_from_hci()  # {hci_index: {"bdaddr": "AA:..", ...}}
+    except Exception as exc:  # noqa: BLE001 - discovery is advisory only
+        print(f"[recovery] could not enumerate adapters: {type(exc).__name__}: {exc}")
+        return 0, None
+    if not adapters:
+        return 0, None
+    hci = 0 if 0 in adapters else sorted(adapters)[0]
+    return hci, adapters[hci].get("bdaddr")
+
+
+def _recover_adapter(loop):
+    """Power-cycle the BLE adapter to clear a wedged BlueZ/HCI state.
+
+    Tries the bluetooth-auto-recovery library first (power-cycles the controller via
+    the kernel mgmt socket, USB-resets only if truly silent). Falls back to the
+    `systemctl restart bluetooth` command that is already known to fix this by hand.
+    Returns True if a recovery path reported success. Never raises.
+    """
+    hci, mac = _resolve_adapter()
+
+    if recover_adapter is not None:
+        try:
+            ok = loop.run_until_complete(recover_adapter(hci, mac, gone_silent=True))
+            print(f"[recovery] recover_adapter(hci{hci}, {mac}) -> {ok}")
+            if ok:
+                return True
+        except Exception as exc:  # noqa: BLE001 - fall through to the CLI fallback
+            print(f"[recovery] recover_adapter failed: {type(exc).__name__}: {exc}")
+
+    # Fallback: the exact command proven to work by hand on this server.
+    try:
+        subprocess.run(
+            ["systemctl", "restart", "bluetooth"],
+            check=True,
+            capture_output=True,
+            timeout=30,
+        )
+        print("[recovery] 'systemctl restart bluetooth' succeeded")
+        return True
+    except Exception as exc:  # noqa: BLE001 - log and let the next cycle retry
+        print(f"[recovery] 'systemctl restart bluetooth' failed: "
+              f"{type(exc).__name__}: {exc}")
+        return False
+
+
 def background_updater():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
     labels = {n: b.get("label", n) for n, b in CONFIG["batteries"].items()}
+    last_recovery = 0.0  # epoch of the last adapter-recovery attempt (cooldown)
+    # Consecutive-miss counter for *every* configured battery, used to detect a
+    # wedged adapter. Kept independent of latest_data so a battery that has never
+    # been read once (adapter already wedged at startup) still counts toward
+    # recovery, not just ones with a last-known-good reading.
+    miss_counts = {name: 0 for name in BATTERIES}
 
     while True:
         try:
@@ -162,12 +243,34 @@ def background_updater():
                         result["last_seen"] = now
                         result["misses"] = 0
                         latest_data[name] = result
-                    elif name in latest_data:
-                        # No reading this cycle: keep the last-known-good values
-                        # and bump the miss counter so api_data() can flag it stale.
-                        latest_data[name]["misses"] = (
-                            latest_data[name].get("misses", 0) + 1
-                        )
+                        miss_counts[name] = 0
+                    else:
+                        miss_counts[name] = miss_counts.get(name, 0) + 1
+                        if name in latest_data:
+                            # Keep the last-known-good values and mirror the miss
+                            # count so api_data() can flag the card stale.
+                            latest_data[name]["misses"] = miss_counts[name]
+
+            max_misses = max(miss_counts.values(), default=0)
+
+            # A battery missing for several consecutive cycles means the adapter has
+            # wedged. Power-cycle it (rate-limited) so the missing batteries return
+            # on their own — no manual `systemctl restart bluetooth` or reboot.
+            if (
+                max_misses >= RECOVER_AFTER_MISSES
+                and now - last_recovery >= RECOVER_COOLDOWN_SECONDS
+            ):
+                print(
+                    f"[recovery] {max_misses} consecutive misses — recovering BLE adapter"
+                )
+                last_recovery = now
+                if _recover_adapter(loop):
+                    # Reset miss counters so we wait a full RECOVER_AFTER_MISSES
+                    # window before deciding the recovery didn't take.
+                    miss_counts = {name: 0 for name in BATTERIES}
+                    with update_lock:
+                        for entry in latest_data.values():
+                            entry["misses"] = 0
         except (KeyboardInterrupt, SystemExit):
             raise
         except BaseException as exc:  # noqa: BLE001 - never let the poll thread die
