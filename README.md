@@ -142,14 +142,14 @@ python3 tools/clean_scan.py
 
 > **Make sure the venv is active first** — your prompt should start with `(venv)`. If it doesn't (e.g. you opened a new terminal), run `cd ~/linux-lifepo4-bms-monitor && source venv/bin/activate` first, or you'll get `ModuleNotFoundError: No module named 'bleak'`.
 
-This will list every nearby Bluetooth device. Look for ones whose name matches your battery (often `JBD`, `xiaoxiang`, `BP00`, `BT-TH-...`, or similar) and **copy the MAC address** (the `XX:XX:XX:XX:XX:XX` part).
+This will list every nearby Bluetooth device. Look for ones whose name matches your battery (often `JBD`, `xiaoxiang`, `BP00`, `BT-TH-...`, or similar) and **copy the MAC address** (the `XX:XX:XX:XX:XX:XX` part after the `|`).
 
 Example output:
 
 ```
-A4:C1:37:55:C8:D3   xiaoxiang BMS
-A4:C1:37:55:C2:29   xiaoxiang BMS
-E2:E7:79:8A:56:A3   BT-TH-EC9C
+📡 xiaoxiang BMS          | A4:C1:37:55:C8:D3
+📡 xiaoxiang BMS          | A4:C1:37:55:C2:29
+📡 BT-TH-EC9C             | E2:E7:79:8A:56:A3
 ```
 
 Write down the MAC for each of your batteries — you'll need them in the next step.
@@ -219,7 +219,7 @@ Dashboard running at http://127.0.0.1:8040
 Keep this terminal open while using the dashboard.
 ```
 
-Open **http://127.0.0.1:8040** in a browser on the same machine. Wait ~15 seconds for the first battery reading to come in. You should see cards with SOC, voltage, current, cell bars, etc.
+Open **http://127.0.0.1:8040** in a browser on the same machine. Wait 30–60 seconds for the first battery reading to appear (more batteries = longer first poll). You should see cards with SOC, voltage, current, cell bars, etc.
 
 **To stop:** press **Ctrl+C** in the terminal.
 
@@ -235,12 +235,16 @@ If something didn't work, jump to [Troubleshooting](#troubleshooting).
 python3 dashboard.py
 ```
 
-Opens on the port from `config.json` (default **8040**). You can override at runtime:
+Opens on the port from `config.json` (default **8040**). You can override the host and port at runtime:
 
 ```bash
-python3 dashboard.py --port 9000           # CLI flag
-BMS_DASHBOARD_PORT=9000 python3 dashboard.py   # env variable (handy for systemd)
+python3 dashboard.py --port 9000                        # CLI flag — port only
+python3 dashboard.py --host 192.168.1.50 --port 9000    # CLI flags — host and port
+BMS_DASHBOARD_PORT=9000 python3 dashboard.py            # env variable (handy for systemd)
+BMS_DASHBOARD_HOST=192.168.1.50 python3 dashboard.py    # bind to a specific interface
 ```
+
+The `--host` / `BMS_DASHBOARD_HOST` override is useful on a multi-homed host (e.g. a Pi with both `eth0` and `wlan0`) when you want the dashboard to listen on one interface only.
 
 ### Terminal monitor
 
@@ -417,14 +421,34 @@ All settings live in `config.json` at the project root.
 | `batteries.<name>.protocol` | `"jbd"` or `"ecoworthy"`. |
 | `batteries.<name>.label` | Display name on the dashboard. |
 
-Two ways to override the port without editing `config.json`:
+Two ways to override the port or host without editing `config.json`:
 
 ```bash
 python3 dashboard.py --port 9000
 BMS_DASHBOARD_PORT=9000 python3 dashboard.py
+
+python3 dashboard.py --host 192.168.1.50
+BMS_DASHBOARD_HOST=192.168.1.50 python3 dashboard.py
 ```
 
+`--host` / `BMS_DASHBOARD_HOST` is useful on a multi-homed host (e.g. a Pi with both `eth0` and `wlan0`) to bind the dashboard to one interface only.
+
 After editing `config.json`, restart the dashboard (or `sudo systemctl restart bms-dashboard` if you set up the service).
+
+---
+
+## Advanced tuning
+
+These four constants are defined at the top of `dashboard.py`. They are **not** in `config.json` — edit `dashboard.py` directly to change them.
+
+| Constant | Default | What it controls |
+|---|---|---|
+| `STALE_AFTER_MISSES` | `1` | Consecutive missed polls before a battery's card is shown as stale/dimmed. |
+| `FETCH_ATTEMPTS` | `2` | Read attempts per battery per cycle before it counts as a miss. |
+| `RECOVER_AFTER_MISSES` | `3` | Consecutive misses before the BLE adapter is power-cycled. |
+| `RECOVER_COOLDOWN_SECONDS` | `300` | Minimum seconds between adapter-recovery attempts. |
+
+> **Common tweak:** bump `STALE_AFTER_MISSES` to `2` to reduce single-miss flicker on a marginal signal — the card won't dim until two polls in a row fail.
 
 ---
 
@@ -433,8 +457,49 @@ After editing `config.json`, restart the dashboard (or `sudo systemctl restart b
 - Uses **Bluetooth Low Energy (BLE)** via the `bleak` Python library.
 - Most batteries use the common **JBD protocol** (parsed by `aiobmsble`).
 - The **ECO-WORTHY** BMS uses a custom service (`0000fff0`) and was reverse-engineered for this project — we send the same commands the official phone app uses, then parse the raw notification packets.
-- A background thread polls each battery sequentially (BLE only allows one connection at a time per adapter), stores the latest reading in memory, and a tiny Flask server hands that JSON to the browser.
+- A background thread polls each battery sequentially (BLE only allows one connection at a time per adapter). Each battery is retried up to `FETCH_ATTEMPTS` (2) times per cycle before counting as a miss. On a miss the last-known-good values are **retained** — the card stays visible but is dimmed/marked stale rather than disappearing.
+- A background watchdog tracks consecutive misses per battery. When any battery reaches `RECOVER_AFTER_MISSES` (3) consecutive misses, the watchdog power-cycles the BLE adapter in-process — graduating from a gentle power-cycle to a USB reset if needed — rate-limited by `RECOVER_COOLDOWN_SECONDS` (300 s), and falling back to `systemctl restart bluetooth`. See the Troubleshooting section for reading the recovery logs.
+- A tiny Flask server serves that data as JSON to the browser at `/api/data`.
 - The browser uses vanilla JavaScript + a vendored Tailwind runtime — everything is served locally. **No internet connection is required at any point after install.**
+
+---
+
+# API
+
+The dashboard exposes two read-only JSON endpoints, useful for integrations (e.g. Home Assistant, scripts, or custom UIs).
+
+## `GET /api/data`
+
+Returns a JSON object keyed by battery id (the key names from `config.json`'s `batteries` block). Each value contains:
+
+**Measurement fields** (not all protocols populate all fields — ECO-WORTHY omits `temperature`, `cycles`, and `delta_mv`):
+
+| Field | Type | Description |
+|---|---|---|
+| `voltage` | float | Pack voltage (V) |
+| `current` | float | Charge/discharge current (A) |
+| `power` | float | Instantaneous power (W) |
+| `soc` | int | State of charge (%) |
+| `temperature` | float | BMS temperature (°C) — JBD only |
+| `cells` | list[float] | Per-cell voltages (V) |
+| `delta_mv` | float | Max cell spread (mV) — JBD only |
+| `cycles` | int | Charge cycle count — JBD only |
+
+**Status fields** (always present):
+
+| Field | Type | Description |
+|---|---|---|
+| `label` | string | Display name from `config.json` |
+| `last_seen` | float | Epoch seconds of the last successful read |
+| `misses` | int | Consecutive missed polls since the last good reading |
+| `stale` | bool | `true` when `misses >= STALE_AFTER_MISSES` |
+| `age_seconds` | int | Seconds elapsed since the last successful read |
+
+A battery that has never been read yet does not appear in the response at all.
+
+## `GET /api/config`
+
+Returns the `ui` block from `config.json` — useful for reading dashboard titles, refresh interval, etc. without parsing the config file directly.
 
 ---
 
@@ -460,7 +525,7 @@ After editing `config.json`, restart the dashboard (or `sudo systemctl restart b
 **Some batteries drop off after the dashboard has been running for hours (and only a reboot or `systemctl restart bluetooth` brings them back)**
 - This is a known BLE-on-Linux failure mode: the adapter/BlueZ stack wedges after extended scanning and stops returning some devices.
 - The dashboard now handles this automatically — if a battery misses several consecutive polls it power-cycles the adapter in-process (via `bluetooth-auto-recovery`, falling back to `systemctl restart bluetooth`), and the missing batteries return on their own.
-- Watch it work: `journalctl -u bms-dashboard -f | grep recovery`.
+- Watch it work: `journalctl -u bms-dashboard -f | grep -E 'recovery|background_updater'`.
 - **Reading the `[recovery]` logs:**
   - Success looks like: `[recovery] recover_adapter(hci0, …, gone_silent=False) -> True` (a gentle power-cycle worked; it escalates to `gone_silent=True` only if that fails).
   - A permission failure looks like: `recover_adapter(...) -> False` or a `PermissionError`, usually followed by `[recovery] 'systemctl restart bluetooth' failed: …`. That means the service can't reach the Bluetooth management socket — add the `AmbientCapabilities` lines to the unit file (see *Install as a systemd service*) and `sudo systemctl daemon-reload && sudo systemctl restart bms-dashboard`.

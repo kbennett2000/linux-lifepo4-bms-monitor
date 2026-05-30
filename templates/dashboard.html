@@ -15,7 +15,7 @@
         })();
     </script>
 
-    <!-- Tailwind Play CDN: config MUST be set AFTER the script loads. -->
+    <!-- Tailwind is vendored locally (no CDN). config MUST be set AFTER the script loads. -->
     <script src="{{ url_for('static', filename='js/tailwind.js') }}"></script>
     <script>
         tailwind.config = { darkMode: 'class' };

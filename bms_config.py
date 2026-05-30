@@ -29,7 +29,7 @@ def load_config() -> dict:
 
 
 def battery_tuples(cfg: dict) -> dict:
-    """Return ``{name: (address, protocol)}`` for legacy code paths."""
+    """Return ``{name: (address, protocol)}`` for all configured batteries."""
     return {
         name: (b["address"], b["protocol"])
         for name, b in cfg.get("batteries", {}).items()
