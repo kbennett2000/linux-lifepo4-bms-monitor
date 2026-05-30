@@ -55,7 +55,7 @@ cp config.example.json config.json
 python3 dashboard.py
 ```
 
-Open http://localhost:8040 in a browser. Done.
+Open http://127.0.0.1:8040 in a browser. Done.
 
 If you're new to this, follow the step-by-step guide below.
 
@@ -65,7 +65,8 @@ If you're new to this, follow the step-by-step guide below.
 
 ## What you need before you start
 
-1. A computer running **Ubuntu 22.04 or 24.04** (desktop or server edition, both work).
+1. A computer running **Ubuntu 22.04 or 24.04** (desktop or server edition, both work), with **Python 3.10 or newer**.
+   - **Raspberry Pi users:** use **Raspberry Pi OS Bookworm** (ships Python 3.11). The older Bullseye release ships Python 3.9, which is too old — `pip install` or the dashboard will fail.
 2. **A working Bluetooth adapter.** Most laptops have one built in. For a desktop or headless server you may need a USB Bluetooth dongle (any cheap BLE 4.0+ dongle from Amazon works).
 3. **Your battery's Bluetooth MAC address.** We'll find this in Step 4.
 4. About 5 minutes.
@@ -139,6 +140,8 @@ Power on your batteries and make sure the BMS phone app is **closed** on all pho
 python3 tools/clean_scan.py
 ```
 
+> **Make sure the venv is active first** — your prompt should start with `(venv)`. If it doesn't (e.g. you opened a new terminal), run `cd ~/linux-lifepo4-bms-monitor && source venv/bin/activate` first, or you'll get `ModuleNotFoundError: No module named 'bleak'`.
+
 This will list every nearby Bluetooth device. Look for ones whose name matches your battery (often `JBD`, `xiaoxiang`, `BP00`, `BT-TH-...`, or similar) and **copy the MAC address** (the `XX:XX:XX:XX:XX:XX` part).
 
 Example output:
@@ -189,6 +192,8 @@ You'll see this:
 - `address` — the MAC address from Step 4
 - `protocol` — `"jbd"` for almost everything, or `"ecoworthy"` for ECO-WORTHY brand
 - `label` — whatever name you want shown on the dashboard
+
+> **ECO-WORTHY note:** the `"ecoworthy"` protocol was reverse-engineered from one specific ECO-WORTHY hardware revision. If your ECO-WORTHY battery shows up in the scan but its card stays empty/stale, your unit likely uses a slightly different packet format — please [open a GitHub issue](https://github.com/kbennett2000/linux-lifepo4-bms-monitor/issues) with your battery's model and MAC so the parser can be extended. Standard JBD-protocol batteries are unaffected.
 
 You can also change:
 
@@ -298,6 +303,14 @@ sudo ufw allow 8040/tcp
 ## Step D — Install as a systemd service
 
 This makes the dashboard start at boot and auto-restart if it ever crashes.
+
+> **Prerequisite — the venv must exist on _this_ machine.** The service runs `venv/bin/python`, so if you're setting up a fresh server (rather than the machine where you ran the Quick Start) you must first create and populate the venv here, or the service fails to start with `status=203/EXEC`:
+> ```bash
+> cd ~/linux-lifepo4-bms-monitor
+> python3 -m venv venv
+> venv/bin/pip install -r requirements.txt
+> ```
+> This also installs `bluetooth-auto-recovery` (it's already listed in `requirements.txt`) — the dependency that lets the dashboard recover a wedged Bluetooth adapter on its own. No separate install step is needed.
 
 **1. Find your exact paths:**
 
@@ -448,7 +461,14 @@ After editing `config.json`, restart the dashboard (or `sudo systemctl restart b
 - This is a known BLE-on-Linux failure mode: the adapter/BlueZ stack wedges after extended scanning and stops returning some devices.
 - The dashboard now handles this automatically — if a battery misses several consecutive polls it power-cycles the adapter in-process (via `bluetooth-auto-recovery`, falling back to `systemctl restart bluetooth`), and the missing batteries return on their own.
 - Watch it work: `journalctl -u bms-dashboard -f | grep recovery`.
-- If recovery never fires or logs a permission error, the service lacks `CAP_NET_ADMIN` — add the `AmbientCapabilities` lines to the unit file (see *Install as a systemd service*) and `sudo systemctl daemon-reload && sudo systemctl restart bms-dashboard`.
+- **Reading the `[recovery]` logs:**
+  - Success looks like: `[recovery] recover_adapter(hci0, …, gone_silent=False) -> True` (a gentle power-cycle worked; it escalates to `gone_silent=True` only if that fails).
+  - A permission failure looks like: `recover_adapter(...) -> False` or a `PermissionError`, usually followed by `[recovery] 'systemctl restart bluetooth' failed: …`. That means the service can't reach the Bluetooth management socket — add the `AmbientCapabilities` lines to the unit file (see *Install as a systemd service*) and `sudo systemctl daemon-reload && sudo systemctl restart bms-dashboard`.
+  - If you see **no** `[recovery]` lines at all when batteries drop, recovery isn't being triggered — confirm the dropped battery's MAC is correct (a wrong address looks the same as a wedge).
+
+**A live battery keeps flickering "Stale" and back to normal**
+- A card is marked **Stale** after a single missed poll, because one dropped BLE advertisement is common — this is cosmetic and expected on a marginal signal; the card keeps showing its last reading.
+- Automatic adapter recovery only kicks in after **3 consecutive** misses, so brief stale flicker does not trigger a power-cycle. If a battery is *constantly* stale, improve the signal (move the dongle closer / add a USB extension) or check for a phone app holding the connection.
 
 **Tray widget icon is invisible / shows nothing**
 - Run it **outside** the venv: `deactivate && python3 battery_widget.py`.

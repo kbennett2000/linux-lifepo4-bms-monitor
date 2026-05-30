@@ -5,7 +5,18 @@
     const container = document.getElementById('battery-container');
     const summary = document.getElementById('summary');
     const emptyState = document.getElementById('empty-state');
+    const emptyStateText = document.getElementById('empty-state-text');
     const lastUpdated = document.getElementById('last-updated');
+    const statusDot = document.getElementById('status-dot');
+
+    const EMPTY_TEXT_WAITING = 'Waiting for first battery reading…';
+    const EMPTY_TEXT_HELP =
+        'No batteries reporting yet. Check the MAC addresses in config.json, make sure ' +
+        'no phone app is connected to a battery, and see the Troubleshooting section of the README.';
+    // After this many consecutive empty polls, assume it's misconfigured rather than
+    // just starting up, and show actionable guidance instead of "Waiting…".
+    const EMPTY_HELP_AFTER_POLLS = Math.max(1, Math.ceil(60 / refreshSeconds));
+    let emptyPolls = 0;
 
     // ---- Theme toggle ----
     const toggle = document.getElementById('theme-toggle');
@@ -36,6 +47,7 @@
     function formatAge(seconds) {
         if (seconds === null || seconds === undefined || isNaN(seconds)) return 'just now';
         const s = Math.max(0, Math.round(seconds));
+        if (s === 0) return 'just now';
         if (s < 60) return `${s}s ago`;
         const m = Math.floor(s / 60);
         if (m < 60) return `${m}m ago`;
@@ -102,7 +114,7 @@
                     <p class="text-xs text-slate-500 dark:text-slate-500 font-mono mt-0.5">${d.address}</p>
                     ${stale ? `<p class="stale-note">⚠ stale · last seen ${formatAge(d.age_seconds)}</p>` : ''}
                 </div>
-                <span class="dir-badge ${stale ? 'dir-stale' : dir.cls}">${stale ? '⚠ Stale' : `${dir.arrow} ${dir.label}`}</span>
+                <span class="dir-badge ${stale ? 'dir-stale' : dir.cls}">${stale ? 'Stale' : `${dir.arrow} ${dir.label}`}</span>
             </div>
 
             <div class="flex items-center gap-5 mb-6">
@@ -157,14 +169,29 @@
         </article>`;
     }
 
+    function setStatus(ok) {
+        if (!statusDot) return;
+        // Green pulse when data is flowing; amber (no pulse) when we can't reach the API.
+        statusDot.classList.toggle('bg-emerald-500', ok);
+        statusDot.classList.toggle('animate-pulse', ok);
+        statusDot.classList.toggle('bg-amber-500', !ok);
+    }
+
     function render(batteries) {
         const names = Object.keys(batteries);
         if (names.length === 0) {
             container.innerHTML = '';
-            emptyState.classList.remove('hidden');
             summary.innerHTML = '';
+            emptyState.classList.remove('hidden');
+            emptyPolls += 1;
+            if (emptyStateText) {
+                emptyStateText.textContent =
+                    emptyPolls >= EMPTY_HELP_AFTER_POLLS ? EMPTY_TEXT_HELP : EMPTY_TEXT_WAITING;
+            }
             return;
         }
+        emptyPolls = 0;
+        if (emptyStateText) emptyStateText.textContent = EMPTY_TEXT_WAITING;
         emptyState.classList.add('hidden');
         renderSummary(batteries);
         container.innerHTML = names.map(n => renderCard(n, batteries[n])).join('');
@@ -175,10 +202,12 @@
             const res = await fetch('/api/data');
             const data = await res.json();
             render(data);
+            setStatus(true);
             lastUpdated.textContent = 'Updated ' + new Date().toLocaleTimeString();
         } catch (e) {
             console.error(e);
-            lastUpdated.textContent = 'Connection error';
+            setStatus(false);
+            lastUpdated.textContent = 'Connection error – is the dashboard running?';
         }
     }
 

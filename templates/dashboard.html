@@ -46,7 +46,7 @@
                      class="flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-medium
                             bg-white border border-slate-200 text-slate-600
                             dark:bg-slate-800/60 dark:border-slate-700 dark:text-slate-300">
-                    <span class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
+                    <span id="status-dot" class="w-2 h-2 rounded-full bg-emerald-500 animate-pulse"></span>
                     <span id="last-updated">Connecting…</span>
                 </div>
                 <button id="theme-toggle"
@@ -80,7 +80,7 @@
         <!-- Empty state -->
         <div id="empty-state" class="hidden text-center py-20">
             <div class="text-5xl mb-4">🔌</div>
-            <p class="text-slate-500 dark:text-slate-400">Waiting for first battery reading…</p>
+            <p id="empty-state-text" class="text-slate-500 dark:text-slate-400">Waiting for first battery reading…</p>
         </div>
 
         <footer class="mt-12 text-center text-xs text-slate-400 dark:text-slate-600">

@@ -176,6 +176,12 @@ def _resolve_adapter():
         return 0, None
     if not adapters:
         return 0, None
+    # NOTE: assumes a single BLE adapter. We pick hci0 (or the lowest index), which
+    # matches Bleak's default adapter. On a host with more than one adapter, recovery
+    # could target the wrong one — warn so that case is visible in the logs.
+    if len(adapters) > 1:
+        print(f"[recovery] multiple BLE adapters found ({sorted(adapters)}); "
+              f"recovery assumes the lowest index — verify it's the one in use")
     hci = 0 if 0 in adapters else sorted(adapters)[0]
     return hci, adapters[hci].get("bdaddr")
 
@@ -183,21 +189,29 @@ def _resolve_adapter():
 def _recover_adapter(loop):
     """Power-cycle the BLE adapter to clear a wedged BlueZ/HCI state.
 
-    Tries the bluetooth-auto-recovery library first (power-cycles the controller via
-    the kernel mgmt socket, USB-resets only if truly silent). Falls back to the
+    Tries the bluetooth-auto-recovery library first, escalating from a gentle power
+    cycle to a USB reset only if the gentle attempt fails. Falls back to the
     `systemctl restart bluetooth` command that is already known to fix this by hand.
     Returns True if a recovery path reported success. Never raises.
     """
     hci, mac = _resolve_adapter()
 
     if recover_adapter is not None:
-        try:
-            ok = loop.run_until_complete(recover_adapter(hci, mac, gone_silent=True))
-            print(f"[recovery] recover_adapter(hci{hci}, {mac}) -> {ok}")
-            if ok:
-                return True
-        except Exception as exc:  # noqa: BLE001 - fall through to the CLI fallback
-            print(f"[recovery] recover_adapter failed: {type(exc).__name__}: {exc}")
+        # Graduated recovery: a plain power-cycle (gone_silent=False) clears most
+        # wedges. Only if that fails do we escalate to gone_silent=True, which adds a
+        # disruptive USB unbind/rebind that can re-enumerate the adapter.
+        for gone_silent in (False, True):
+            try:
+                ok = loop.run_until_complete(
+                    recover_adapter(hci, mac, gone_silent=gone_silent)
+                )
+                print(f"[recovery] recover_adapter(hci{hci}, {mac}, "
+                      f"gone_silent={gone_silent}) -> {ok}")
+                if ok:
+                    return True
+            except Exception as exc:  # noqa: BLE001 - fall through / escalate
+                print(f"[recovery] recover_adapter(gone_silent={gone_silent}) failed: "
+                      f"{type(exc).__name__}: {exc}")
 
     # Fallback: the exact command proven to work by hand on this server.
     try:
@@ -245,7 +259,7 @@ def background_updater():
                         latest_data[name] = result
                         miss_counts[name] = 0
                     else:
-                        miss_counts[name] = miss_counts.get(name, 0) + 1
+                        miss_counts[name] += 1
                         if name in latest_data:
                             # Keep the last-known-good values and mirror the miss
                             # count so api_data() can flag the card stale.
@@ -263,7 +277,10 @@ def background_updater():
                 print(
                     f"[recovery] {max_misses} consecutive misses — recovering BLE adapter"
                 )
-                last_recovery = now
+                # Stamp the cooldown from the actual attempt time, not the pre-scan
+                # `now` (a full scan can take minutes), so the cooldown reflects real
+                # elapsed time between recovery attempts.
+                last_recovery = time.time()
                 if _recover_adapter(loop):
                     # Reset miss counters so we wait a full RECOVER_AFTER_MISSES
                     # window before deciding the recovery didn't take.
