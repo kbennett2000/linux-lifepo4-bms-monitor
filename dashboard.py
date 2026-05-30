@@ -31,6 +31,17 @@ from bms_config import battery_tuples, load_config
 CONFIG = load_config()
 BATTERIES = battery_tuples(CONFIG)
 
+# A battery that fails to produce a fresh reading for this many consecutive poll
+# cycles is shown as "stale" (last-known values, dimmed in the UI) instead of
+# disappearing from the dashboard. Counting cycles rather than wall-clock seconds
+# keeps the flag accurate even though a full poll cycle can take anywhere from
+# ~40s to a couple of minutes depending on BLE scan timing.
+STALE_AFTER_MISSES = 1
+
+# Attempts per battery within a single cycle before it counts as a miss. One retry
+# absorbs the common case of a single dropped BLE scan / missed advertisement.
+FETCH_ATTEMPTS = 2
+
 app = Flask(__name__, static_folder="static", template_folder="templates")
 
 latest_data = {}
@@ -115,6 +126,20 @@ async def fetch_ecoworthy(name, address):
         return None
 
 
+def _fetch_with_retry(loop, name, addr, proto, attempts=FETCH_ATTEMPTS):
+    """Read a single battery, retrying a few times before giving up this cycle.
+
+    Each attempt needs a fresh coroutine (a coroutine cannot be awaited twice).
+    Returns the reading dict on success, or None if every attempt failed.
+    """
+    for _ in range(attempts):
+        coro = fetch_jbd(name, addr) if proto == "jbd" else fetch_ecoworthy(name, addr)
+        result = loop.run_until_complete(coro)
+        if result:
+            return result
+    return None
+
+
 def background_updater():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -122,19 +147,34 @@ def background_updater():
     labels = {n: b.get("label", n) for n, b in CONFIG["batteries"].items()}
 
     while True:
-        new_data = {}
-        for name, (addr, proto) in BATTERIES.items():
-            if proto == "jbd":
-                result = loop.run_until_complete(fetch_jbd(name, addr))
-            else:
-                result = loop.run_until_complete(fetch_ecoworthy(name, addr))
-            if result:
-                result["label"] = labels.get(name, name)
-                new_data[name] = result
+        try:
+            results = {
+                name: _fetch_with_retry(loop, name, addr, proto)
+                for name, (addr, proto) in BATTERIES.items()
+            }
 
-        with update_lock:
-            latest_data.clear()
-            latest_data.update(new_data)
+            now = time.time()
+            with update_lock:
+                for name, result in results.items():
+                    if result:
+                        # Fresh reading: store it and reset the miss counter.
+                        result["label"] = labels.get(name, name)
+                        result["last_seen"] = now
+                        result["misses"] = 0
+                        latest_data[name] = result
+                    elif name in latest_data:
+                        # No reading this cycle: keep the last-known-good values
+                        # and bump the miss counter so api_data() can flag it stale.
+                        latest_data[name]["misses"] = (
+                            latest_data[name].get("misses", 0) + 1
+                        )
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except BaseException as exc:  # noqa: BLE001 - never let the poll thread die
+            # A single bad cycle (including CancelledError, which is a BaseException
+            # and would otherwise escape) must not kill the updater thread, or the
+            # whole dashboard would freeze until a manual restart.
+            print(f"[background_updater] cycle error: {type(exc).__name__}: {exc}")
 
         time.sleep(10)
 
@@ -146,8 +186,16 @@ def dashboard():
 
 @app.route("/api/data")
 def api_data():
+    now = time.time()
     with update_lock:
-        return jsonify(latest_data)
+        snapshot = {name: dict(entry) for name, entry in latest_data.items()}
+
+    for entry in snapshot.values():
+        misses = entry.get("misses", 0)
+        entry["stale"] = misses >= STALE_AFTER_MISSES
+        entry["age_seconds"] = int(max(0.0, now - entry.get("last_seen", now)))
+
+    return jsonify(snapshot)
 
 
 @app.route("/api/config")

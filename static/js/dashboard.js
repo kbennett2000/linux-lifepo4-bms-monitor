@@ -33,6 +33,16 @@
         return Number(n).toFixed(d);
     }
 
+    function formatAge(seconds) {
+        if (seconds === null || seconds === undefined || isNaN(seconds)) return 'just now';
+        const s = Math.max(0, Math.round(seconds));
+        if (s < 60) return `${s}s ago`;
+        const m = Math.floor(s / 60);
+        if (m < 60) return `${m}m ago`;
+        const h = Math.floor(m / 60);
+        return `${h}h ago`;
+    }
+
     // ---- Render summary tiles ----
     function renderSummary(batteries) {
         const arr = Object.values(batteries);
@@ -66,6 +76,7 @@
     function renderCard(name, d) {
         const accent = socAccent(d.soc);
         const dir = direction(d.current);
+        const stale = !!d.stale;
         const circumference = 2 * Math.PI * 45;
         const offset = circumference - (Math.max(0, Math.min(100, d.soc)) / 100) * circumference;
 
@@ -84,13 +95,14 @@
         }).join('');
 
         return `
-        <article class="bms-card flex flex-col">
+        <article class="bms-card flex flex-col${stale ? ' stale' : ''}">
             <div class="flex items-start justify-between gap-3 mb-5">
                 <div class="min-w-0">
                     <h2 class="text-lg font-semibold truncate">${d.label || name}</h2>
                     <p class="text-xs text-slate-500 dark:text-slate-500 font-mono mt-0.5">${d.address}</p>
+                    ${stale ? `<p class="stale-note">⚠ stale · last seen ${formatAge(d.age_seconds)}</p>` : ''}
                 </div>
-                <span class="dir-badge ${dir.cls}">${dir.arrow} ${dir.label}</span>
+                <span class="dir-badge ${stale ? 'dir-stale' : dir.cls}">${stale ? '⚠ Stale' : `${dir.arrow} ${dir.label}`}</span>
             </div>
 
             <div class="flex items-center gap-5 mb-6">

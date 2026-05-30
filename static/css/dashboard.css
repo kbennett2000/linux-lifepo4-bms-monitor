@@ -167,3 +167,31 @@ html.dark .dir-idle {
     background: rgba(148, 163, 184, 0.15);
     color: rgb(148 163 184);
 }
+.dir-stale {
+    background: rgba(245, 158, 11, 0.15);
+    color: rgb(180 83 9);
+}
+html.dark .dir-stale {
+    background: rgba(245, 158, 11, 0.18);
+    color: rgb(245 158 11);
+}
+
+/* Stale battery: values are the last-known-good reading, not a live update.
+   The card stays visible but is dimmed and labelled so it is clearly distinct
+   from a battery that is reporting in real time. */
+.bms-card.stale {
+    opacity: 0.6;
+    border-color: rgb(245 158 11);
+}
+html.dark .bms-card.stale {
+    border-color: rgb(180 83 9);
+}
+.stale-note {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: rgb(180 83 9);
+    margin-top: 0.125rem;
+}
+html.dark .stale-note {
+    color: rgb(245 158 11);
+}
