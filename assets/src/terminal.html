@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 900px; }
+  body { background: #0b0d12; padding: 36px; font-family: ui-sans-serif, system-ui, sans-serif; }
+  .term { background: #0f1117; border: 1px solid #1e2530; border-radius: 12px; overflow: hidden;
+          box-shadow: 0 24px 60px rgba(0,0,0,0.5); }
+  .bar { display: flex; align-items: center; gap: 8px; padding: 12px 16px; background: #151922;
+         border-bottom: 1px solid #1e2530; }
+  .dot { width: 13px; height: 13px; border-radius: 50%; }
+  .r { background: #ff5f57; } .y { background: #febc2e; } .g { background: #28c840; }
+  .title { margin-left: 10px; color: #64748b; font-size: 14px; font-family: ui-monospace, monospace; }
+  pre { padding: 22px 26px; font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+        font-size: 16px; line-height: 1.55; color: #cbd5e1; white-space: pre; }
+  .hdr { color: #2dd4bf; font-weight: 700; }
+  .name { color: #e2e8f0; }
+  .lbl { color: #64748b; }
+  .pos { color: #34d399; }
+  .neg { color: #f472b6; }
+  .val { color: #f1f5f9; }
+  .dim { color: #475569; }
+</style>
+</head>
+<body>
+  <div class="term">
+    <div class="bar">
+      <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+      <span class="title">python3 battery_monitor.py --demo</span>
+    </div>
+<pre><span class="hdr">=== Battery Monitor @ 13:33:39 ===</span>
+
+🔋 Reading <span class="name">House Bank · 200Ah</span> ...
+   <span class="lbl">Voltage      :</span> <span class="val">13.21 V</span>
+   <span class="lbl">Current      :</span> <span class="neg">-22.40 A</span>
+   <span class="lbl">SOC          :</span> <span class="val">85%</span>
+   <span class="lbl">Power        :</span> <span class="neg">-295.9 W</span>
+   <span class="lbl">Temperature  :</span> <span class="val">23.5 °C</span>
+   <span class="lbl">Cell ΔV      :</span> <span class="val">4.0 mV</span>
+   <span class="lbl">Cycles       :</span> <span class="val">142</span>
+   <span class="lbl">Cells        :</span> <span class="dim">['3.301', '3.305', '3.302', '3.303']</span>
+
+🔋 Reading <span class="name">Solar Array · 200Ah</span> ...
+   <span class="lbl">Voltage      :</span> <span class="val">14.05 V</span>
+   <span class="lbl">Current      :</span> <span class="pos">18.60 A</span>
+   <span class="lbl">SOC          :</span> <span class="val">92%</span>
+   <span class="lbl">Power        :</span> <span class="pos">261.3 W</span>
+   <span class="lbl">Temperature  :</span> <span class="val">25.1 °C</span>
+   <span class="lbl">Cell ΔV      :</span> <span class="val">3.0 mV</span>
+   <span class="lbl">Cycles       :</span> <span class="val">88</span>
+   <span class="lbl">Cells        :</span> <span class="dim">['3.512', '3.514', '3.511', '3.513']</span>
+
+🔋 Reading <span class="name">Reserve · 330Ah</span> ...
+   <span class="lbl">Voltage      :</span> <span class="val">13.40 V</span>
+   <span class="lbl">Current      :</span> <span class="val">0.00 A</span>
+   <span class="lbl">SOC          :</span> <span class="val">99%</span>
+   <span class="lbl">Power        :</span> <span class="val">0.0 W</span>
+   <span class="lbl">Temperature  :</span> <span class="val">22.0 °C</span>
+   <span class="lbl">Cell ΔV      :</span> <span class="val">2.0 mV</span>
+   <span class="lbl">Cycles       :</span> <span class="val">37</span>
+   <span class="lbl">Cells        :</span> <span class="dim">['3.349', '3.351', '3.350', '3.350']</span>
+
+<span class="dim">--- All batteries read — sleeping 25 seconds ---</span></pre>
+  </div>
+</body>
+</html>

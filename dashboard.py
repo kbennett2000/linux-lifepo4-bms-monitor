@@ -17,6 +17,7 @@ Author: Kris Bennett (May 2026)
 
 import argparse
 import asyncio
+import os
 import subprocess
 import threading
 import time
@@ -299,6 +300,50 @@ def background_updater():
         time.sleep(10)
 
 
+# Sample batteries used by --demo mode. They tell a complete story at a glance:
+# a bank being drawn down, a bank charging from solar, and a full bank sitting idle.
+# This lets anyone preview the dashboard without a real BMS, and is what the README
+# screenshots are generated from.
+DEMO_BATTERIES = {
+    "house_200ah": {
+        "address": "A4:C1:37:55:C8:D3",
+        "voltage": 13.21, "current": -22.4, "power": -295.9, "soc": 85,
+        "temperature": 23.5, "delta_mv": 4.0, "cycles": 142,
+        "cells": [3.301, 3.305, 3.302, 3.303], "label": "House Bank · 200Ah",
+    },
+    "solar_200ah": {
+        "address": "A4:C1:37:55:C2:29",
+        "voltage": 14.05, "current": 18.6, "power": 261.3, "soc": 92,
+        "temperature": 25.1, "delta_mv": 3.0, "cycles": 88,
+        "cells": [3.512, 3.514, 3.511, 3.513], "label": "Solar Array · 200Ah",
+    },
+    "reserve_330ah": {
+        "address": "A4:C1:37:25:C4:4D",
+        "voltage": 13.40, "current": 0.0, "power": 0.0, "soc": 99,
+        "temperature": 22.0, "delta_mv": 2.0, "cycles": 37,
+        "cells": [3.349, 3.351, 3.350, 3.350], "label": "Reserve · 330Ah",
+    },
+}
+
+
+def demo_updater():
+    """Populate `latest_data` with realistic sample batteries (no Bluetooth).
+
+    Mirrors the contract of `background_updater()` — same fields, same locking —
+    but never touches BLE. last_seen is refreshed every cycle so the cards always
+    read as fresh rather than going stale. Used by `--demo` / BMS_DEMO_MODE.
+    """
+    while True:
+        now = time.time()
+        with update_lock:
+            for name, base in DEMO_BATTERIES.items():
+                entry = dict(base)
+                entry["last_seen"] = now
+                entry["misses"] = 0
+                latest_data[name] = entry
+        time.sleep(5)
+
+
 @app.route("/")
 def dashboard():
     return render_template("dashboard.html", ui=CONFIG["ui"])
@@ -327,14 +372,24 @@ def main():
     parser = argparse.ArgumentParser(description="LiFePO4 BMS web dashboard")
     parser.add_argument("--host", default=None, help="Override listen host")
     parser.add_argument("--port", type=int, default=None, help="Override listen port")
+    parser.add_argument(
+        "--demo",
+        action="store_true",
+        help="Show sample batteries instead of polling Bluetooth (no hardware needed)",
+    )
     args = parser.parse_args()
 
     host = args.host or CONFIG["server"].get("host", "0.0.0.0")
     port = args.port or CONFIG["server"].get("port", 8040)
 
-    threading.Thread(target=background_updater, daemon=True).start()
+    demo = args.demo or os.environ.get("BMS_DEMO_MODE")
+    threading.Thread(
+        target=demo_updater if demo else background_updater, daemon=True
+    ).start()
 
     display_host = "127.0.0.1" if host == "0.0.0.0" else host
+    if demo:
+        print("DEMO MODE — showing sample batteries, no Bluetooth required.")
     print(f"Dashboard running at http://{display_host}:{port}")
     print("Keep this terminal open while using the dashboard.")
 

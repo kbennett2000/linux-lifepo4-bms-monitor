@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 1280px; height: 360px; }
+  body {
+    background:
+      radial-gradient(900px 360px at 15% -10%, rgba(16,185,129,0.22), transparent 70%),
+      radial-gradient(700px 320px at 100% 120%, rgba(45,212,191,0.16), transparent 70%),
+      #0b0d12;
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    color: #e2e8f0;
+    display: flex;
+    align-items: center;
+    gap: 40px;
+    padding: 0 64px;
+    overflow: hidden;
+  }
+  .icon { flex: 0 0 auto; }
+  .content { display: flex; flex-direction: column; gap: 14px; }
+  h1 {
+    font-size: 62px;
+    font-weight: 800;
+    letter-spacing: -1.5px;
+    line-height: 1;
+    background: linear-gradient(90deg, #34d399 0%, #2dd4bf 60%, #22d3ee 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+  .tagline { font-size: 23px; color: #94a3b8; font-weight: 400; letter-spacing: 0.2px; }
+  .tagline b { color: #cbd5e1; font-weight: 600; }
+  .chips { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 6px; }
+  .chip {
+    font-size: 15px; font-weight: 600; color: #a7f3d0;
+    background: rgba(16,185,129,0.10);
+    border: 1px solid rgba(16,185,129,0.30);
+    border-radius: 999px; padding: 7px 15px;
+  }
+  .chip.alt { color: #99f6e4; background: rgba(45,212,191,0.10); border-color: rgba(45,212,191,0.30); }
+  .chip.neutral { color: #cbd5e1; background: rgba(148,163,184,0.10); border-color: rgba(148,163,184,0.28); }
+</style>
+</head>
+<body>
+  <div class="icon">
+    <svg width="150" height="150" viewBox="0 0 100 100" fill="none">
+      <defs>
+        <linearGradient id="bat" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0" stop-color="#34d399"/>
+          <stop offset="1" stop-color="#2dd4bf"/>
+        </linearGradient>
+      </defs>
+      <rect x="14" y="28" width="64" height="44" rx="9" stroke="url(#bat)" stroke-width="5"/>
+      <rect x="78" y="42" width="9" height="16" rx="3" fill="url(#bat)"/>
+      <rect x="22" y="36" width="11" height="28" rx="2.5" fill="url(#bat)"/>
+      <rect x="38" y="36" width="11" height="28" rx="2.5" fill="url(#bat)" opacity="0.85"/>
+      <rect x="54" y="36" width="11" height="28" rx="2.5" fill="url(#bat)" opacity="0.55"/>
+      <path d="M52 18 L40 52 L50 52 L46 82 L64 44 L53 44 L60 18 Z" fill="#0b0d12" stroke="#0b0d12" stroke-width="6" stroke-linejoin="round"/>
+      <path d="M52 18 L40 52 L50 52 L46 82 L64 44 L53 44 L60 18 Z" fill="#fbbf24"/>
+    </svg>
+  </div>
+  <div class="content">
+    <h1>LiFePO4 BMS Monitor</h1>
+    <div class="tagline">Real-time Bluetooth battery monitoring for Linux · <b>100% offline</b></div>
+    <div class="chips">
+      <span class="chip">Web Dashboard</span>
+      <span class="chip">Terminal</span>
+      <span class="chip">Tray Widget</span>
+      <span class="chip alt">JBD / Daly / Overkill</span>
+      <span class="chip alt">ECO-WORTHY</span>
+      <span class="chip neutral">Raspberry Pi ready</span>
+    </div>
+  </div>
+</body>
+</html>

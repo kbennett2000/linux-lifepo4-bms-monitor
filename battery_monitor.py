@@ -24,6 +24,7 @@ How it works:
 Author: Kris Bennett (May 2026)
 """
 
+import argparse
 import asyncio
 import time
 # Bleak is the modern Bluetooth Low Energy library for Python
@@ -176,12 +177,45 @@ async def read_ecoworthy_battery(name: str, address: str):
         print(f"   ❌ Error: {type(e).__name__} - {e}")
 
 
-async def main():
+# Sample readings used by --demo mode, so the terminal monitor can be previewed
+# (and screenshotted for the README) without a real BMS connected.
+DEMO_READINGS = [
+    ("House Bank · 200Ah", 13.21, -22.4, 85, -295.9, 23.5, 4.0, 142,
+     [3.301, 3.305, 3.302, 3.303]),
+    ("Solar Array · 200Ah", 14.05, 18.6, 92, 261.3, 25.1, 3.0, 88,
+     [3.512, 3.514, 3.511, 3.513]),
+    ("Reserve · 330Ah", 13.40, 0.0, 99, 0.0, 22.0, 2.0, 37,
+     [3.349, 3.351, 3.350, 3.350]),
+]
+
+
+def print_demo():
+    """Print one cycle of sample readings (no Bluetooth) for previews/screenshots."""
+    print(f"\n=== Battery Monitor @ {time.strftime('%H:%M:%S')} ===")
+    for name, v, c, soc, p, temp, dv, cyc, cells in DEMO_READINGS:
+        print(f"\n🔋 Reading {name} ...")
+        print(f"   Voltage      : {v:.2f} V")
+        print(f"   Current      : {c:.2f} A")
+        print(f"   SOC          : {soc}%")
+        print(f"   Power        : {p:.1f} W")
+        print(f"   Temperature  : {temp:.1f} °C")
+        print(f"   Cell ΔV      : {dv:.1f} mV")
+        print(f"   Cycles       : {cyc}")
+        print(f"   Cells        : {[f'{x:.3f}' for x in cells]}")
+    print(f"\n--- All batteries read — sleeping 25 seconds ---\n")
+
+
+async def main(demo=False):
     """
     Main loop of the program.
     Continuously reads all batteries in sequence and prints the results.
     """
     while True:
+        if demo:
+            print_demo()
+            await asyncio.sleep(25)
+            continue
+
         print(f"\n=== Battery Monitor @ {time.strftime('%H:%M:%S')} ===")
 
         # Read each battery one at a time (prevents Bluetooth "InProgress" errors)
@@ -200,5 +234,12 @@ async def main():
 # Program entry point
 # =============================================================================
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="LiFePO4 BMS terminal monitor")
+    parser.add_argument(
+        "--demo",
+        action="store_true",
+        help="Show sample readings instead of polling Bluetooth (no hardware needed)",
+    )
+    args = parser.parse_args()
     # This is the standard way to run an asyncio program
-    asyncio.run(main())
+    asyncio.run(main(demo=args.demo))

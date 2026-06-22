@@ -1,9 +1,14 @@
+<p align="center">
+  <img src="assets/banner.png" alt="LiFePO4 BMS Monitor — real-time Bluetooth battery monitoring for Linux" width="100%">
+</p>
+
 # LiFePO4 Battery Monitor for Ubuntu / Linux
 
+[![Release](https://img.shields.io/github/v/release/kbennett2000/linux-lifepo4-bms-monitor?color=10b981)](https://github.com/kbennett2000/linux-lifepo4-bms-monitor/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg)](https://www.python.org/)
 [![Platform: Linux](https://img.shields.io/badge/Platform-Linux-informational.svg)](#what-you-need-before-you-start)
-[![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](#contributing)
+[![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 
 **Real-time Bluetooth monitoring for JBD-style and ECO-WORTHY LiFePO4 BMS batteries.**
 
@@ -26,6 +31,30 @@ Highlights:
 - One `config.json` controls everything
 
 Tested on **Ubuntu 24.04** and **22.04** (server and desktop).
+
+> **No battery handy?** Run `python3 dashboard.py --demo` to explore the full UI with
+> realistic sample data — no Bluetooth or hardware required.
+
+---
+
+## Screenshots
+
+The web dashboard — one card per battery, with state-of-charge ring, live voltage /
+current / power / temperature, per-cell voltages, and a roll-up summary across the bank.
+Ships with a built-in light **and** dark theme.
+
+| Dark | Light |
+|:---:|:---:|
+| [![Dashboard, dark theme](assets/dashboard-dark.png)](assets/dashboard-dark.png) | [![Dashboard, light theme](assets/dashboard-light.png)](assets/dashboard-light.png) |
+
+Prefer the terminal? `battery_monitor.py` prints the same data as a clean text feed —
+ideal for quick checks and `ssh`:
+
+<p align="center">
+  <img src="assets/terminal.png" alt="Terminal monitor output" width="60%">
+</p>
+
+> All screenshots above are real output from `--demo` mode.
 
 ---
 
@@ -56,6 +85,9 @@ python3 dashboard.py
 ```
 
 Open http://127.0.0.1:8040 in a browser. Done.
+
+> Just want to see what it looks like first? Skip the config and run
+> `python3 dashboard.py --demo` for a full dashboard backed by sample data.
 
 If you're new to this, follow the step-by-step guide below.
 
@@ -246,10 +278,17 @@ BMS_DASHBOARD_HOST=192.168.1.50 python3 dashboard.py    # bind to a specific int
 
 The `--host` / `BMS_DASHBOARD_HOST` override is useful on a multi-homed host (e.g. a Pi with both `eth0` and `wlan0`) when you want the dashboard to listen on one interface only.
 
+Add `--demo` to either tool to render sample batteries with no Bluetooth — handy for trying the UI, taking screenshots, or developing offline:
+
+```bash
+python3 dashboard.py --demo
+```
+
 ### Terminal monitor
 
 ```bash
-python3 battery_monitor.py
+python3 battery_monitor.py            # live data
+python3 battery_monitor.py --demo     # sample data, no hardware needed
 ```
 
 Prints a fresh reading for each battery every ~25 seconds. Press Ctrl+C to stop.
@@ -462,6 +501,9 @@ These four constants are defined at the top of `dashboard.py`. They are **not** 
 - A tiny Flask server serves that data as JSON to the browser at `/api/data`.
 - The browser uses vanilla JavaScript + a vendored Tailwind runtime — everything is served locally. **No internet connection is required at any point after install.**
 
+> **Design notes:** the rationale behind the in-process BLE-adapter recovery (rather than an
+> external watchdog) is written up as an ADR: [docs/adr/0001-ble-battery-disappearance-recovery.md](docs/adr/0001-ble-battery-disappearance-recovery.md).
+
 ---
 
 # API
@@ -564,6 +606,10 @@ PRs welcome! Especially:
 - Better parsing for other ECO-WORTHY variants
 - Docker / container support
 - Home Assistant integration
+
+See **[CONTRIBUTING.md](CONTRIBUTING.md)** for the dev setup, how to run the app in
+`--demo` mode without hardware, coding conventions, and how to report a new BMS.
+Notable changes are tracked in the **[CHANGELOG](CHANGELOG.md)**.
 
 ---
 
