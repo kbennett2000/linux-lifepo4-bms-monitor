@@ -60,6 +60,11 @@ watchdog falls back to shelling out to `systemctl restart bluetooth`.
   simultaneous connections (typically 7), and the connect-per-poll pattern is what `aiobmsble`
   expects. Not pursued.
 
+  > **Superseded by [0002](0002-ecoworthy-persistent-connection.md).** The `aiobmsble` claim was
+  > wrong — `BaseBMS` defaults to `keep_alive=True` and supports held connections. Persistent
+  > connections are now opt-in per battery and enabled for the ECO-WORTHY, whose module stopped
+  > advertising altogether under connect-per-poll churn.
+
 - **Always use `gone_silent=True` (USB reset) on every recovery attempt** — simpler code but
   forces a disruptive USB re-enumeration even for soft wedges that a gentle power-cycle would fix.
   Rejected in favour of graduated escalation.

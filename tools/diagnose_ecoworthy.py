@@ -15,10 +15,13 @@ Why this is useful:
 It is completely safe — it only reads the device structure and never writes data.
 
 Usage:
-    python3 diagnose_ecoworthy.py
+    python3 diagnose_ecoworthy.py                     # from config.json
+    python3 diagnose_ecoworthy.py AA:BB:CC:DD:EE:FF   # explicit MAC
 """
 
 import asyncio
+import sys
+from pathlib import Path
 
 # Bleak is the modern Bluetooth Low Energy library for Python
 from bleak import BleakClient, BleakScanner
@@ -32,8 +35,18 @@ async def main():
     2. Connects to it
     3. Prints every service and every characteristic with its properties
     """
-    # MAC address of the ECO-WORTHY battery we want to inspect
-    address = "E2:E7:79:8A:56:A3"
+    # Which battery to inspect: a MAC on the command line, else the first
+    # ECO-WORTHY entry in config.json.
+    if len(sys.argv) > 1:
+        address = sys.argv[1]
+    else:
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        from bms_config import battery_entries, load_config
+        entries = battery_entries(load_config())
+        match = next((e for e in entries.values() if e["protocol"] == "ecoworthy"), None)
+        if match is None:
+            sys.exit("No ecoworthy battery in config.json — pass a MAC address instead.")
+        address = match["address"]
 
     print(f"🔍 Connecting to ECO-WORTHY battery {address}...\n")
 

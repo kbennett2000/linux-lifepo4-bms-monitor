@@ -30,16 +30,16 @@ from gi.repository import Gtk, AppIndicator3, GLib
 import asyncio
 import threading
 
-# BLE libraries for talking to the batteries
-from bleak import BleakScanner, BleakClient
-from aiobmsble.bms.jbd_bms import BMS
+# Shared BLE driver layer (protocol dispatch + graceful connection teardown)
+import bms_driver
 
 import webbrowser   # Used to open the web dashboard when user clicks the button
 
 # Shared config (battery list + dashboard port for the "Open Dashboard" button)
-from bms_config import battery_tuples, load_config
+from bms_config import battery_entries, load_config, polling_config
 
 _CONFIG = load_config()
+_POLLING = polling_config(_CONFIG)
 
 
 class BatteryTray:
@@ -86,7 +86,13 @@ class BatteryTray:
         self.indicator.set_menu(self.menu)
 
         # List of all batteries we want to monitor (from config.json)
-        self.BATTERIES = battery_tuples(_CONFIG)
+        self.BATTERIES = battery_entries(_CONFIG)
+        bms_driver.validate_protocols(self.BATTERIES)
+
+        # Guards against overlapping refreshes: one pass over the bank takes far
+        # longer than the 12-second timer, so without this the widget would pile up
+        # threads all driving the same BLE adapter at once.
+        self._busy = threading.Lock()
 
         self.latest_data = {}   # Will hold the most recent data for each battery
 
@@ -96,75 +102,15 @@ class BatteryTray:
 
     # ====================== DATA FETCHING ======================
 
-    async def fetch_jbd(self, name: str, address: str):
-        """Fetch data from a standard JBD-style BMS using the aiobmsble library."""
-        try:
-            device = await BleakScanner.find_device_by_address(address, timeout=8.0)
-            if not device:
-                return None
-            async with BMS(ble_device=device) as bms:
-                data = await bms.async_update()
-                return {
-                    "name": name,
-                    "soc": data.get('battery_level', 0),
-                    "voltage": round(data.get('voltage', 0), 2),
-                    "current": round(data.get('current', 0), 2),
-                    "power": round(data.get('power', 0), 1),
-                    "cells": [round(v, 3) for v in (data.get('cell_voltages') or [])]
-                }
-        except Exception:
-            return None
-
-    async def fetch_ecoworthy(self, name: str, address: str):
-        """Fetch data from the ECO-WORTHY BMS using raw BLE commands + notifications."""
-        try:
-            device = await BleakScanner.find_device_by_address(address, timeout=10.0)
-            if not device:
-                return None
-
-            a1 = a2 = None
-            async with BleakClient(device) as client:
-                def handler(sender, data):
-                    nonlocal a1, a2
-                    h = data.hex()
-                    if h.startswith("e2e7798a56a3a1"):
-                        a1 = h
-                    elif h.startswith("e2e7798a56a3a2"):
-                        a2 = h
-
-                await client.start_notify("0000fff1-0000-1000-8000-00805f9b34fb", handler)
-                await client.write_gatt_char("0000fff2-0000-1000-8000-00805f9b34fb", bytes.fromhex("dda50300fffd77"))
-                await asyncio.sleep(1.2)
-                await client.write_gatt_char("0000fff2-0000-1000-8000-00805f9b34fb", bytes.fromhex("dda50400fffc77"))
-                await asyncio.sleep(1.5)
-
-            if not a2 or not a1:
-                return None
-
-            a2b = bytes.fromhex(a2)
-            cells = [round(int.from_bytes(a2b[14 + i*2:16 + i*2], "big") / 1000, 3) for i in range(4)]
-            voltage = round(sum(cells), 2)
-
-            a1b = bytes.fromhex(a1)
-            current = round(int.from_bytes(a1b[20:22], "big", signed=True) / 10, 2)
-            power = round(voltage * current, 1)
-            soc = a1b[15]
-
-            return {
-                "name": name,
-                "soc": soc,
-                "voltage": voltage,
-                "current": current,
-                "power": power,
-                "cells": cells
-            }
-        except Exception:
-            return None
-
     # ====================== UPDATE LOGIC ======================
 
     def update(self):
         """Called by GLib every 12 seconds to trigger a background data refresh."""
+        # Skip this tick if the previous refresh is still running. A full pass over
+        # four batteries takes much longer than the timer interval, and overlapping
+        # passes mean several BLE scanners and clients fighting over one adapter.
+        if self._busy.locked():
+            return True
         threading.Thread(target=self._fetch_and_update, daemon=True).start()
         return True   # Return True to keep the timer running
 
@@ -173,23 +119,36 @@ class BatteryTray:
         Runs in a background thread.
         Fetches fresh data from all batteries and then updates the UI on the main thread.
         """
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+        with self._busy:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
 
-        new_data = {}
-        for name, (addr, proto) in self.BATTERIES.items():
-            if proto == "jbd":
-                result = loop.run_until_complete(self.fetch_jbd(name, addr))
-            else:
-                result = loop.run_until_complete(self.fetch_ecoworthy(name, addr))
-            if result:
-                new_data[name] = result
+            new_data = {}
+            try:
+                for name, entry in self.BATTERIES.items():
+                    # Always non-persistent here: this thread builds a fresh event
+                    # loop every refresh and closes it below, so a held connection
+                    # created in one pass would be unusable in the next.
+                    result = loop.run_until_complete(
+                        bms_driver.read_battery(
+                            name,
+                            entry["address"],
+                            entry["protocol"],
+                            persistent=False,
+                            scan_timeout=_POLLING["scan_timeout"],
+                        )
+                    )
+                    if result:
+                        result["name"] = entry["label"]
+                        new_data[name] = result
+            finally:
+                # Must run even if a read raises, or the loop and its D-Bus
+                # transport leak while the GLib timer keeps making replacements.
+                loop.close()
 
-        loop.close()
-
-        self.latest_data = new_data
-        # Schedule the UI update to run on the main GTK thread
-        GLib.idle_add(self._update_ui)
+            self.latest_data = new_data
+            # Schedule the UI update to run on the main GTK thread
+            GLib.idle_add(self._update_ui)
 
     def _update_ui(self):
         """
@@ -206,9 +165,14 @@ class BatteryTray:
         # Build the detailed text shown when you click the tray icon
         text = "<span size='large' weight='bold'>🔋 Battery Status</span>\n\n"
         for batt in self.latest_data.values():
+            def num(value, digits):
+                # Not every protocol reports every field; show an em dash instead
+                # of crashing on a None.
+                return "—" if value is None else f"{value:.{digits}f}"
+
             text += f"<b>{batt['name']}</b>\n"
-            text += f"   🔋 <b>{batt['soc']}%</b>   {batt['voltage']} V\n"
-            text += f"   {batt['current']:.2f} A   {batt.get('power', 0):.1f} W\n"
+            text += f"   🔋 <b>{batt['soc']}%</b>   {num(batt['voltage'], 2)} V\n"
+            text += f"   {num(batt['current'], 2)} A   {num(batt.get('power'), 1)} W\n"
             text += f"   Cells: {' | '.join(map(str, batt['cells']))}\n\n"
 
         self.details_label.set_markup(text)

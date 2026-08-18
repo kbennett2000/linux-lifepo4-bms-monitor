@@ -85,10 +85,18 @@
     }
 
     // ---- Render one battery card ----
+    function releaseLabel(seconds) {
+        const m = Math.ceil(Math.max(0, seconds) / 60);
+        return m <= 1 ? 'under a minute left' : `${m}m left`;
+    }
+
     function renderCard(name, d) {
         const accent = socAccent(d.soc);
         const dir = direction(d.current);
-        const stale = !!d.stale;
+        const released = !!d.released;
+        // A released battery is intentionally handed to the phone app, so don't
+        // also flag it as stale — that reads as a fault.
+        const stale = !!d.stale && !released;
         const circumference = 2 * Math.PI * 45;
         const offset = circumference - (Math.max(0, Math.min(100, d.soc)) / 100) * circumference;
 
@@ -113,8 +121,9 @@
                     <h2 class="text-lg font-semibold truncate">${d.label || name}</h2>
                     <p class="text-xs text-slate-500 dark:text-slate-500 font-mono mt-0.5">${d.address}</p>
                     ${stale ? `<p class="stale-note">⚠ stale · last seen ${formatAge(d.age_seconds)}</p>` : ''}
+                    ${released ? `<p class="release-note">📱 released for phone app · ${releaseLabel(d.release_seconds_left)}</p>` : ''}
                 </div>
-                <span class="dir-badge ${stale ? 'dir-stale' : dir.cls}">${stale ? 'Stale' : `${dir.arrow} ${dir.label}`}</span>
+                <span class="dir-badge ${released ? 'dir-released' : (stale ? 'dir-stale' : dir.cls)}">${released ? 'Released' : (stale ? 'Stale' : `${dir.arrow} ${dir.label}`)}</span>
             </div>
 
             <div class="flex items-center gap-5 mb-6">
@@ -166,6 +175,13 @@
                 <div>Cycles: <span class="text-slate-700 dark:text-slate-200 font-medium">${d.cycles ?? '—'}</span></div>
                 <div>ΔV: <span class="text-slate-700 dark:text-slate-200 font-medium">${d.delta_mv != null ? d.delta_mv + ' mV' : '—'}</span></div>
             </div>
+
+            ${d.releasable ? `
+            <div class="mt-3 flex justify-end">
+                <button class="release-btn" data-battery="${name}" data-action="${released ? 'resume' : 'release'}">
+                    ${released ? 'Take back now' : 'Release for phone app'}
+                </button>
+            </div>` : ''}
         </article>`;
     }
 
@@ -196,6 +212,24 @@
         renderSummary(batteries);
         container.innerHTML = names.map(n => renderCard(n, batteries[n])).join('');
     }
+
+    container.addEventListener('click', async (ev) => {
+        const btn = ev.target.closest('.release-btn');
+        if (!btn) return;
+        const { battery, action } = btn.dataset;
+        btn.disabled = true;
+        btn.textContent = action === 'release' ? 'Releasing…' : 'Reconnecting…';
+        try {
+            await fetch(`/api/ble/${action}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ battery }),
+            });
+        } catch (e) {
+            console.error(e);
+        }
+        tick();
+    });
 
     async function tick() {
         try {

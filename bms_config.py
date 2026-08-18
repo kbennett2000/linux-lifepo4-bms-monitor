@@ -34,3 +34,42 @@ def battery_tuples(cfg: dict) -> dict:
         name: (b["address"], b["protocol"])
         for name, b in cfg.get("batteries", {}).items()
     }
+
+
+def battery_entries(cfg: dict) -> dict:
+    """Return the full per-battery record, with defaults filled in.
+
+    ``persistent`` asks the driver layer to hold one BLE connection open for that
+    battery instead of reconnecting on every poll. It defaults to ``False`` so an
+    existing ``config.json`` behaves exactly as before.
+    """
+    return {
+        name: {
+            "address": b["address"],
+            "protocol": b["protocol"],
+            "label": b.get("label", name),
+            "persistent": bool(b.get("persistent", False)),
+        }
+        for name, b in cfg.get("batteries", {}).items()
+    }
+
+
+# Defaults chosen to match the previously hard-coded behaviour, so adding the optional
+# "polling" block to config.json is the only way to change any of them.
+_POLLING_DEFAULTS = {
+    "interval_seconds": 10,     # pause between poll cycles
+    "attempts": 2,              # tries per battery per cycle before counting a miss
+    "scan_timeout": 8.0,        # seconds to look for a battery's advertisement
+    "release_minutes": 5,       # default hold-off when releasing a battery to a phone app
+    "release_max_minutes": 30,  # clamp, so a bad request can't release it indefinitely
+}
+
+
+def polling_config(cfg: dict) -> dict:
+    """Return the polling/tuning block, with every key defaulted."""
+    block = cfg.get("polling", {})
+    resolved = dict(_POLLING_DEFAULTS)
+    for key, default in _POLLING_DEFAULTS.items():
+        if key in block:
+            resolved[key] = type(default)(block[key])
+    return resolved

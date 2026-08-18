@@ -30,7 +30,8 @@
     "ecoworthy": {
       "address": "E2:E7:79:8A:56:A3",
       "protocol": "ecoworthy",
-      "label": "ECO-WORTHY"
+      "label": "ECO-WORTHY",
+      "persistent": true
     }
   }
 }

@@ -1,90 +1,95 @@
 #!/usr/bin/env python3
 """
-test_ecoworthy.py - Raw BLE Command Test Tool for ECO-WORTHY BMS
-================================================================
+test_ecoworthy.py - BMS driver probe
+====================================
 
-This is a low-level diagnostic / development tool that:
-- Connects directly to the ECO-WORTHY battery
-- Enables notifications on the correct characteristic
-- Sends the exact same commands the phone app uses
-- Prints the raw hex packets received from the battery
+Connects to one battery using the same `aiobmsble` driver the dashboard uses, and
+prints what comes back. Use it to check that a battery is understood *before*
+wiring it into config.json, and to diagnose one that reports nothing.
 
-Why this tool exists:
-- It helps us understand and debug the custom ECO-WORTHY protocol
-- Useful when developing or extending support for this (or similar) batteries
-- Great for learning how BLE communication with these BMS works
-
-This script is intentionally "noisy" — it prints raw data so you can see exactly what the battery is sending.
+With -v it also prints every raw BLE frame and, crucially, any
+`invalid checksum` line. The ECO-WORTHY driver validates a MODBUS CRC on every
+frame; if your hardware revision computes it differently, every frame is silently
+discarded and the battery looks permanently offline. That log line is the way to
+tell those two situations apart.
 
 Usage:
-    python3 test_ecoworthy.py
+    python3 tools/test_ecoworthy.py                     # first ecoworthy battery in config.json
+    python3 tools/test_ecoworthy.py -v                  # + raw frames and CRC diagnostics
+    python3 tools/test_ecoworthy.py AA:BB:CC:DD:EE:FF   # explicit MAC
+    python3 tools/test_ecoworthy.py --protocol jbd AA:BB:CC:DD:EE:FF
 """
 
+import argparse
 import asyncio
+import logging
+import sys
+from pathlib import Path
 
-# Bleak is the modern Bluetooth Low Energy library for Python
-from bleak import BleakScanner, BleakClient
+# Allow running as `python3 tools/test_ecoworthy.py` from the project root.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+import bms_driver
+from bms_config import battery_entries, load_config
 
 
-# =============================================================================
-# CONFIGURATION
-# =============================================================================
+def pick_battery(address, protocol):
+    """Resolve which battery to probe: explicit args win, else config.json."""
+    entries = battery_entries(load_config())
 
-ADDRESS = "E2:E7:79:8A:56:A3"
+    if address:
+        return "probe", {"address": address, "protocol": protocol or "ecoworthy"}
 
-# These are the specific UUIDs used by the ECO-WORTHY BMS
-SERVICE_UUID = "0000fff0-0000-1000-8000-00805f9b34fb"
-WRITE_UUID   = "0000fff2-0000-1000-8000-00805f9b34fb"   # Where we send commands
-NOTIFY_UUID  = "0000fff1-0000-1000-8000-00805f9b34fb"   # Where the battery sends responses
+    for name, entry in entries.items():
+        if entry["protocol"] == (protocol or "ecoworthy"):
+            return name, entry
+
+    sys.exit(
+        f"No battery with protocol {protocol or 'ecoworthy'!r} in config.json — "
+        f"pass a MAC address instead."
+    )
 
 
 async def main():
-    """
-    Main test function.
+    parser = argparse.ArgumentParser(description="Probe one BMS with its aiobmsble driver")
+    parser.add_argument("address", nargs="?", help="MAC address (default: from config.json)")
+    parser.add_argument("--protocol", help="Protocol name (default: ecoworthy)")
+    parser.add_argument("-v", "--verbose", action="store_true",
+                        help="Show raw BLE frames and CRC validation failures")
+    args = parser.parse_args()
 
-    This connects to the battery, subscribes to notifications, and sends
-    the two standard commands that the phone app uses to request data.
-    """
-    print(f"Connecting to ECO-WORTHY {ADDRESS}...")
+    if args.verbose:
+        logging.basicConfig(level=logging.DEBUG, format="%(name)s: %(message)s")
+        for noisy in ("aiobmsble", "bleak", "bleak_retry_connector"):
+            logging.getLogger(noisy).setLevel(logging.DEBUG)
 
-    # Find the device on Bluetooth (required to get a proper BLEDevice object)
-    device = await BleakScanner.find_device_by_address(ADDRESS, timeout=10.0)
-    if not device:
-        print("❌ Device not found")
-        print("   Tip: Make sure the phone app is completely closed and Bluetooth has been toggled off/on.")
-        return
+    name, entry = pick_battery(args.address, args.protocol)
+    print(f"Probing {entry['address']} as protocol {entry['protocol']!r} ...\n")
 
-    # Connect to the battery
-    async with BleakClient(device) as client:
-        print("✅ Connected!\n")
+    reading = await bms_driver.read_battery(
+        name, entry["address"], entry["protocol"], persistent=False
+    )
 
-        # Enable notifications so the battery can send us data automatically
-        await client.start_notify(
-            NOTIFY_UUID,
-            lambda sender, data: print(f"RX: {data.hex()}")
-        )
-        print("Notifications enabled — waiting for responses from the BMS...\n")
+    if reading is None:
+        print("\n❌ No reading.")
+        print("   Re-run with -v. If you see 'invalid checksum' lines the driver is")
+        print("   reaching the battery but rejecting its frames — report that upstream")
+        print("   to aiobmsble with the raw frames. If you see nothing at all, the")
+        print("   battery is out of range, powered down, or held by another client")
+        print("   (close the phone app).")
+        return 1
 
-        # Send the first command: Request basic information (voltage, SOC, current, etc.)
-        cmd = bytes.fromhex("dda50300fffd77")
-        await client.write_gatt_char(WRITE_UUID, cmd, response=False)
-        print("Sent basic data request (dda50300fffd77)...")
-
-        await asyncio.sleep(2)   # Give the battery time to respond
-
-        # Send the second command: Request individual cell voltages
-        cmd = bytes.fromhex("dda50400fffc77")
-        await client.write_gatt_char(WRITE_UUID, cmd, response=False)
-        print("Sent cell voltage request (dda50400fffc77)...")
-
-        await asyncio.sleep(2)   # Give the battery time to respond
-
-        print("\nTest complete. Raw packets shown above.")
+    print("✅ Decoded reading:\n")
+    for key, value in reading.items():
+        print(f"   {key:<12}: {value}")
+    print("\nSanity checks:")
+    cells = reading.get("cells") or []
+    if cells:
+        print(f"   sum(cells)  = {sum(cells):.2f} V  (should be close to voltage)")
+    print(f"   cell count  = {len(cells)}")
+    print("   Compare SOC, voltage and current against the phone app before trusting it.")
+    return 0
 
 
-# =============================================================================
-# Program entry point
-# =============================================================================
 if __name__ == "__main__":
-    # This is the standard way to run an asyncio program
-    asyncio.run(main())
+    raise SystemExit(asyncio.run(main()))

@@ -64,8 +64,8 @@ ideal for quick checks and `ssh`:
 |---|---|---|
 | JBD / Jiabaida | Standard JBD | Most common |
 | Daly, Overkill, etc. | JBD compatible | Same protocol |
-| **ECO-WORTHY** | Custom | Reverse-engineered in this project |
-| Others | — | May work if they use the JBD protocol |
+| **ECO-WORTHY** | ECO-WORTHY (MODBUS) | Handled by `aiobmsble`'s ECO-WORTHY driver |
+| Others | Any `aiobmsble` driver | Set `protocol` to the driver name, e.g. `"daly"`, `"jikong"` |
 
 ---
 
@@ -222,10 +222,28 @@ You'll see this:
 **Replace the example batteries with your own.** For each battery, set:
 
 - `address` — the MAC address from Step 4
-- `protocol` — `"jbd"` for almost everything, or `"ecoworthy"` for ECO-WORTHY brand
+- `protocol` — `"jbd"` for almost everything, or `"ecoworthy"` for ECO-WORTHY brand. Any other [`aiobmsble` driver](https://pypi.org/p/aiobmsble/) name also works (`"daly"`, `"jikong"`, …); an unrecognised value now stops the dashboard at startup instead of silently never reporting.
 - `label` — whatever name you want shown on the dashboard
+- `persistent` — optional, default `false`. Hold one BLE connection open for this battery instead of reconnecting every poll. **Recommended for ECO-WORTHY** (see the note below).
 
-> **ECO-WORTHY note:** the `"ecoworthy"` protocol was reverse-engineered from one specific ECO-WORTHY hardware revision. If your ECO-WORTHY battery shows up in the scan but its card stays empty/stale, your unit likely uses a slightly different packet format — please [open a GitHub issue](https://github.com/kbennett2000/linux-lifepo4-bms-monitor/issues) with your battery's model and MAC so the parser can be extended. Standard JBD-protocol batteries are unaffected.
+> **ECO-WORTHY note:** these modules accept a single BLE client at a time and some
+> firmware revisions stop advertising for good if a connection is torn down without
+> being closed properly — recoverable only by discharging the pack to cutoff and
+> recharging it. Setting `"persistent": true` makes the dashboard hold one link (the
+> way the phone app does) instead of reconnecting a thousand-plus times a day, and
+> every disconnect unsubscribes first. Use the **Release for phone app** button on the
+> card when you want to use the official app.
+
+To check that a battery is understood before wiring it in, probe it directly:
+
+```bash
+python3 tools/test_ecoworthy.py -v            # first ecoworthy battery in config.json
+python3 tools/test_ecoworthy.py AA:BB:CC:DD:EE:FF --protocol jbd
+```
+
+If `-v` prints `invalid checksum` lines, the driver is reaching your battery but
+rejecting its frames — that is a hardware-revision difference worth reporting to
+[`aiobmsble`](https://github.com/patman15/aiobmsble/issues).
 
 You can also change:
 
@@ -385,6 +403,11 @@ WorkingDirectory=/home/YOUR_USERNAME/linux-lifepo4-bms-monitor
 ExecStart=/home/YOUR_USERNAME/linux-lifepo4-bms-monitor/venv/bin/python dashboard.py
 Restart=on-failure
 RestartSec=10
+# Give the dashboard time to close its BLE connections on stop/restart. Killing it
+# outright leaves the battery believing the link is still open, which is what makes
+# some BMS modules stop advertising until they are power-cycled.
+TimeoutStopSec=30
+KillMode=mixed
 # Allow the dashboard to recover a wedged BLE adapter on its own (see below).
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
@@ -457,8 +480,14 @@ All settings live in `config.json` at the project root.
 | `ui.refresh_seconds` | How often the browser polls for new data. Default `8`. |
 | `ui.default_theme` | `"system"`, `"light"`, or `"dark"`. Per-user toggle still wins. |
 | `batteries.<name>.address` | Bluetooth MAC address (`XX:XX:XX:XX:XX:XX`). |
-| `batteries.<name>.protocol` | `"jbd"` or `"ecoworthy"`. |
+| `batteries.<name>.protocol` | `"jbd"`, `"ecoworthy"`, or any other `aiobmsble` driver name. |
 | `batteries.<name>.label` | Display name on the dashboard. |
+| `batteries.<name>.persistent` | Hold one BLE link open instead of reconnecting each poll. Default `false`. |
+| `polling.interval_seconds` | Pause between poll cycles. Default `10`. |
+| `polling.attempts` | Tries per battery per cycle before counting a miss. Default `2`. |
+| `polling.scan_timeout` | Seconds to look for a battery's advertisement. Default `8`. |
+| `polling.release_minutes` | Default duration of a "release for phone app". Default `5`. |
+| `polling.release_max_minutes` | Upper clamp on a release request. Default `30`. |
 
 Two ways to override the port or host without editing `config.json`:
 
@@ -494,27 +523,31 @@ These four constants are defined at the top of `dashboard.py`. They are **not** 
 # How It Works
 
 - Uses **Bluetooth Low Energy (BLE)** via the `bleak` Python library.
-- Most batteries use the common **JBD protocol** (parsed by `aiobmsble`).
-- The **ECO-WORTHY** BMS uses a custom service (`0000fff0`) and was reverse-engineered for this project — we send the same commands the official phone app uses, then parse the raw notification packets.
-- A background thread polls each battery sequentially (BLE only allows one connection at a time per adapter). Each battery is retried up to `FETCH_ATTEMPTS` (2) times per cycle before counting as a miss. On a miss the last-known-good values are **retained** — the card stays visible but is dimmed/marked stale rather than disappearing.
-- A background watchdog tracks consecutive misses per battery. When any battery reaches `RECOVER_AFTER_MISSES` (3) consecutive misses, the watchdog power-cycles the BLE adapter in-process — graduating from a gentle power-cycle to a USB reset if needed — rate-limited by `RECOVER_COOLDOWN_SECONDS` (300 s), and falling back to `systemctl restart bluetooth`. See the Troubleshooting section for reading the recovery logs.
+- Every battery is read through `bms_driver.read_battery()`, which picks the matching **`aiobmsble`** driver from the battery's `protocol`. Adding a supported BMS model is a config change, not a code change.
+- Batteries marked `"persistent": true` keep **one BLE connection open** across polls; the rest connect and disconnect per poll. Every disconnect unsubscribes from notifications first, runs from a `finally`, and is logged if it fails — BlueZ does not close connections when a process dies, and a peripheral that is never told the link ended can keep believing it is still connected (and a connected peripheral stops advertising).
+- On startup, and before any adapter power-cycle, the dashboard sweeps away links BlueZ is still holding from a previous run.
+- A background thread polls each battery sequentially (BLE only allows one connection at a time per adapter). Each battery is retried up to `polling.attempts` (2) times per cycle before counting as a miss. On a miss the last-known-good values are **retained** — the card stays visible but is dimmed/marked stale rather than disappearing.
+- A background watchdog tracks consecutive misses per battery. A wedged adapter loses *every* battery at once, so recovery only fires when a **quorum** of batteries has missed `RECOVER_AFTER_MISSES` (3) consecutive cycles — one flaky pack can no longer power-cycle the adapter for the whole bank. It graduates from a gentle power-cycle to a USB reset, is rate-limited by `RECOVER_COOLDOWN_SECONDS` (300 s), and falls back to `systemctl restart bluetooth`. See the Troubleshooting section for reading the recovery logs.
 - A tiny Flask server serves that data as JSON to the browser at `/api/data`.
 - The browser uses vanilla JavaScript + a vendored Tailwind runtime — everything is served locally. **No internet connection is required at any point after install.**
 
-> **Design notes:** the rationale behind the in-process BLE-adapter recovery (rather than an
-> external watchdog) is written up as an ADR: [docs/adr/0001-ble-battery-disappearance-recovery.md](docs/adr/0001-ble-battery-disappearance-recovery.md).
+> **Design notes:** two ADRs cover this area — the in-process BLE-adapter recovery
+> ([0001](docs/adr/0001-ble-battery-disappearance-recovery.md)) and the persistent
+> ECO-WORTHY connection, release switch, and quorum-gated recovery that supersede parts
+> of it ([0002](docs/adr/0002-ecoworthy-persistent-connection.md)).
 
 ---
 
 # API
 
-The dashboard exposes two read-only JSON endpoints, useful for integrations (e.g. Home Assistant, scripts, or custom UIs).
+The dashboard exposes two read-only JSON endpoints, useful for integrations (e.g. Home Assistant, scripts, or custom UIs), plus two POST endpoints that control the BLE link.
 
 ## `GET /api/data`
 
 Returns a JSON object keyed by battery id (the key names from `config.json`'s `batteries` block). Each value contains:
 
-**Measurement fields** (not all protocols populate all fields — ECO-WORTHY omits `temperature`, `cycles`, and `delta_mv`):
+**Measurement fields.** Not every protocol reports every field; anything a protocol
+does not provide is `null` and renders as `—` (ECO-WORTHY has no cycle count):
 
 | Field | Type | Description |
 |---|---|---|
@@ -522,7 +555,7 @@ Returns a JSON object keyed by battery id (the key names from `config.json`'s `b
 | `current` | float | Charge/discharge current (A) |
 | `power` | float | Instantaneous power (W) |
 | `soc` | int | State of charge (%) |
-| `temperature` | float | BMS temperature (°C) — JBD only |
+| `temperature` | float\|null | BMS temperature (°C) |
 | `cells` | list[float] | Per-cell voltages (V) |
 | `delta_mv` | float | Max cell spread (mV) — JBD only |
 | `cycles` | int | Charge cycle count — JBD only |
@@ -542,6 +575,37 @@ A battery that has never been read yet does not appear in the response at all.
 ## `GET /api/config`
 
 Returns the `ui` block from `config.json` — useful for reading dashboard titles, refresh interval, etc. without parsing the config file directly.
+
+## `POST /api/ble/release`
+
+Temporarily hands a battery's BLE link back so the official phone app can connect.
+These BMS modules accept one client at a time, so a battery held with
+`"persistent": true` is otherwise unreachable from the app. The poll loop drops the
+link on its next pass and skips the battery until the deadline.
+
+```bash
+curl -X POST http://localhost:8040/api/ble/release \
+     -H 'Content-Type: application/json' \
+     -d '{"battery": "ecoworthy", "minutes": 5}'
+```
+
+`minutes` is optional (defaults to `polling.release_minutes`, clamped to
+`polling.release_max_minutes`). The battery card's **Release for phone app** button
+calls this. Returns `404` for an unknown battery id.
+
+## `POST /api/ble/resume`
+
+Cancels a release early; the dashboard reconnects on the next poll cycle.
+
+```bash
+curl -X POST http://localhost:8040/api/ble/resume \
+     -H 'Content-Type: application/json' -d '{"battery": "ecoworthy"}'
+```
+
+> **Note:** these two are the only endpoints that change anything, and like the rest of
+> the API they are unauthenticated. The worst a caller can do is drop a BLE link for a
+> few minutes, which is acceptable for a LAN-only tool — but if you expose the
+> dashboard beyond your own network, put it behind a reverse proxy with auth.
 
 ---
 
@@ -583,7 +647,13 @@ Returns the `ui` block from `config.json` — useful for reading dashboard title
 - On GNOME, install the **AppIndicator** extension.
 
 **ECO-WORTHY values look wrong (huge current, weird SOC)**
-- The phone app is connected — close it. The BMS sends slightly different packet formats depending on which client is asking.
+- Current off by 10× is the protocol-revision difference between ECO-WORTHY firmware versions; the `aiobmsble` driver detects which one your unit speaks from the frame format. Run `python3 tools/test_ecoworthy.py -v` and check `sum(cells)` against `voltage` — if those agree but current looks wrong, report it upstream.
+- If nothing decodes at all, the phone app may be holding the connection — close it, or use the card's **Release for phone app** button so the two never fight over the link.
+
+**The ECO-WORTHY has vanished from Bluetooth entirely and won't come back**
+- If it does not appear in `bluetoothctl scan on` at all, its BLE module is wedged: it believes a connection is still open, so it has stopped advertising. Only a power cycle of the BMS clears this — discharge to cutoff and recharge.
+- Set `"persistent": true` for that battery (see the config section). Holding one link, the way the phone app does, avoids the repeated teardowns that trigger this.
+- Always stop the service with `systemctl stop bms-dashboard` rather than `kill -9`, so the links are closed properly on the way out.
 
 **Dashboard works from the server but not from my phone**
 - Check `server.host` is `0.0.0.0` (not `127.0.0.1`).
@@ -603,7 +673,7 @@ Returns the `ui` block from `config.json` — useful for reading dashboard title
 
 PRs welcome! Especially:
 - Support for additional BMS models
-- Better parsing for other ECO-WORTHY variants
+- Support for more BMS models
 - Docker / container support
 - Home Assistant integration
 
