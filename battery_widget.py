@@ -42,6 +42,22 @@ _CONFIG = load_config()
 _POLLING = polling_config(_CONFIG)
 
 
+def _capacity_line(batt):
+    """Available amp-hours as a share of rated capacity, or None if unknown.
+
+    Returns None rather than an em dash so the popup — which is deliberately compact —
+    simply omits the line for a protocol that reports no capacity, instead of growing a
+    permanently blank row.
+    """
+    available = batt.get("capacity_ah")
+    if available is None:
+        return None
+    rated = batt.get("rated_ah")
+    if not rated:
+        return f"{available:.1f} Ah"
+    return f"{available:.1f} / {rated:.0f} Ah · {available / rated * 100:.0f}%"
+
+
 class BatteryTray:
     """
     Main class that manages the system tray icon and all battery monitoring.
@@ -140,6 +156,9 @@ class BatteryTray:
                     )
                     if result:
                         result["name"] = entry["label"]
+                        # Rated capacity comes from config.json, not the battery, so
+                        # it is merged here alongside the label.
+                        result["rated_ah"] = bms_driver.rated_capacity(entry, result)
                         new_data[name] = result
             finally:
                 # Must run even if a read raises, or the loop and its D-Bus
@@ -173,6 +192,8 @@ class BatteryTray:
             text += f"<b>{batt['name']}</b>\n"
             text += f"   🔋 <b>{batt['soc']}%</b>   {num(batt['voltage'], 2)} V\n"
             text += f"   {num(batt['current'], 2)} A   {num(batt.get('power'), 1)} W\n"
+            if (capacity := _capacity_line(batt)) is not None:
+                text += f"   {capacity}\n"
             text += f"   Cells: {' | '.join(map(str, batt['cells']))}\n\n"
 
         self.details_label.set_markup(text)

@@ -15,22 +15,26 @@
     "200ah_01": {
       "address": "A4:C1:37:55:C8:D3",
       "protocol": "jbd",
-      "label": "200Ah #1"
+      "label": "200Ah #1",
+      "rated_capacity_ah": 200
     },
     "200ah_02": {
       "address": "A4:C1:37:55:C2:29",
       "protocol": "jbd",
-      "label": "200Ah #2"
+      "label": "200Ah #2",
+      "rated_capacity_ah": 200
     },
     "330ah": {
       "address": "A4:C1:37:25:C4:4D",
       "protocol": "jbd",
-      "label": "330Ah"
+      "label": "330Ah",
+      "rated_capacity_ah": 330
     },
     "ecoworthy": {
       "address": "E2:E7:79:8A:56:A3",
       "protocol": "ecoworthy",
       "label": "ECO-WORTHY",
+      "rated_capacity_ah": 50,
       "persistent": true
     }
   }

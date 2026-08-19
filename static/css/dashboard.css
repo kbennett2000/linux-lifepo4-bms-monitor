@@ -245,3 +245,106 @@ html.dark .release-btn:hover:not(:disabled) {
     border-color: rgb(96 165 250);
     color: rgb(96 165 250);
 }
+
+/* Summary tile sub-line: the raw amp-hours behind the Capacity percentage, and the
+   "3 of 4 packs" warning when a battery has no capacity data to contribute. */
+.tile-sub {
+    font-size: 0.7rem;
+    font-variant-numeric: tabular-nums;
+    color: rgb(100 116 139);
+    margin-top: 0.15rem;
+}
+html.dark .tile-sub {
+    color: rgb(100 116 139);
+}
+
+/* Capacity bar: available amp-hours against the pack's *rated* capacity from
+   config.json. The fill is clamped to 100% while the label beside it is not — a
+   healthy pack that reports more than its rating should say so. */
+.cap-bar {
+    position: relative;
+    height: 0.6rem;
+    background: rgb(241 245 249);
+    border-radius: 999px;
+    overflow: hidden;
+}
+html.dark .cap-bar {
+    background: rgb(30 41 59);
+}
+.cap-bar .fill {
+    height: 100%;
+    border-radius: 999px;
+    background: linear-gradient(90deg, rgb(52 211 153), rgb(16 185 129));
+    transition: width 0.4s ease;
+}
+
+/* Secondary reading under a metric (e.g. each temperature sensor behind the mean). */
+.metric-sub {
+    font-size: 0.7rem;
+    font-variant-numeric: tabular-nums;
+    color: rgb(100 116 139);
+    margin-top: 0.1rem;
+}
+html.dark .metric-sub {
+    color: rgb(148 163 184);
+}
+
+/* Footer stat values, shared by cycles / ΔV / SoH / stored energy / runtime. */
+.stat-value {
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+    color: rgb(51 65 85);
+}
+html.dark .stat-value {
+    color: rgb(226 232 240);
+}
+
+/* BMS switch states (charge/discharge MOSFET, balancer). Rendered only for protocols
+   that report them, so absence of a chip means "not reported", never "off". */
+.state-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    padding: 0.1rem 0.5rem;
+    border-radius: 999px;
+    font-size: 0.65rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    font-variant-numeric: tabular-nums;
+}
+.state-chip.is-on {
+    background: rgba(16, 185, 129, 0.12);
+    color: rgb(5 150 105);
+}
+html.dark .state-chip.is-on {
+    background: rgba(16, 185, 129, 0.18);
+    color: rgb(52 211 153);
+}
+.state-chip.is-off {
+    background: rgba(148, 163, 184, 0.15);
+    color: rgb(71 85 105);
+}
+html.dark .state-chip.is-off {
+    background: rgba(148, 163, 184, 0.15);
+    color: rgb(148 163 184);
+}
+
+/* BMS-raised fault. Red rather than the amber used for staleness: stale means we
+   couldn't reach the battery, this means the battery itself is reporting a problem. */
+.dir-problem {
+    background: rgba(239, 68, 68, 0.12);
+    color: rgb(185 28 28);
+}
+html.dark .dir-problem {
+    background: rgba(239, 68, 68, 0.18);
+    color: rgb(248 113 113);
+}
+.problem-note {
+    font-size: 0.75rem;
+    font-weight: 600;
+    color: rgb(185 28 28);
+    margin-top: 0.125rem;
+}
+html.dark .problem-note {
+    color: rgb(248 113 113);
+}

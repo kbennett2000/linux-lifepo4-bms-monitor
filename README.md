@@ -211,10 +211,10 @@ You'll see this:
     "default_theme": "system"
   },
   "batteries": {
-    "200ah_01":  { "address": "A4:C1:37:55:C8:D3", "protocol": "jbd",       "label": "200Ah #1" },
-    "200ah_02":  { "address": "A4:C1:37:55:C2:29", "protocol": "jbd",       "label": "200Ah #2" },
-    "330ah":     { "address": "A4:C1:37:25:C4:4D", "protocol": "jbd",       "label": "330Ah" },
-    "ecoworthy": { "address": "E2:E7:79:8A:56:A3", "protocol": "ecoworthy", "label": "ECO-WORTHY" }
+    "200ah_01":  { "address": "A4:C1:37:55:C8:D3", "protocol": "jbd",       "label": "200Ah #1",   "rated_capacity_ah": 200 },
+    "200ah_02":  { "address": "A4:C1:37:55:C2:29", "protocol": "jbd",       "label": "200Ah #2",   "rated_capacity_ah": 200 },
+    "330ah":     { "address": "A4:C1:37:25:C4:4D", "protocol": "jbd",       "label": "330Ah",      "rated_capacity_ah": 330 },
+    "ecoworthy": { "address": "E2:E7:79:8A:56:A3", "protocol": "ecoworthy", "label": "ECO-WORTHY", "rated_capacity_ah": 50, "persistent": true }
   }
 }
 ```
@@ -225,6 +225,7 @@ You'll see this:
 - `protocol` — `"jbd"` for almost everything, or `"ecoworthy"` for ECO-WORTHY brand. Any other [`aiobmsble` driver](https://pypi.org/p/aiobmsble/) name also works (`"daly"`, `"jikong"`, …); an unrecognised value now stops the dashboard at startup instead of silently never reporting.
 - `label` — whatever name you want shown on the dashboard
 - `persistent` — optional, default `false`. Hold one BLE connection open for this battery instead of reconnecting every poll. **Recommended for ECO-WORTHY** (see the note below).
+- `rated_capacity_ah` — optional. The capacity the battery is sold as, e.g. `200`. It is what the dashboard's capacity readouts are measured against. Leave it out and the battery's own reported full capacity is used instead, which works but hides the difference between rated and actual.
 
 > **ECO-WORTHY note:** these modules accept a single BLE client at a time and some
 > firmware revisions stop advertising for good if a connection is torn down without
@@ -301,6 +302,37 @@ Add `--demo` to either tool to render sample batteries with no Bluetooth — han
 ```bash
 python3 dashboard.py --demo
 ```
+
+#### Reading the summary strip
+
+**Avg SOC** and **Capacity** answer different questions, and on an uneven bank they give
+noticeably different answers.
+
+- **Avg SOC** is the plain mean of each battery's percentage. Every pack counts equally,
+  so a 50 Ah battery moves it exactly as much as a 330 Ah one.
+- **Capacity** is total available amp-hours over total *rated* amp-hours. It is the
+  size-weighted version, and it is the one that tells you how much is actually left in
+  the bank.
+
+In the `--demo` bank the two read 79% and 69% — the gap is one large pack being drawn
+down while the small ones sit full.
+
+Capacity is measured against `rated_capacity_ah` from `config.json`, not against the
+capacity the BMS calls full. That is deliberate: a healthy LiFePO4 pack usually holds a
+little more than its rating (a 50 Ah ECO-WORTHY reports 52 Ah), so measuring against the
+BMS's own number would pin every healthy pack at exactly 100% and hide the headroom.
+**A full pack can therefore read slightly over 100%.** That is the battery beating its
+label, not a bug. If a pack has no `rated_capacity_ah` set, its own reported capacity is
+used instead; if a pack has no capacity data at all, it drops out of the calculation and
+the tile says so (`3 of 4 packs`) rather than quietly reweighting.
+
+Two caveats worth knowing:
+
+- **Amp-hours are whole numbers.** The BMS drivers floor-divide the capacity register, so
+  a battery your phone app shows as 52.02 Ah appears here as 52 Ah.
+- **On ECO-WORTHY, available amp-hours are derived, not measured** — the BMS reports no
+  remaining-capacity register, so the figure is just `full capacity × SOC`. It will track
+  the SOC ring exactly. The JBD packs report a real coulomb-counted value.
 
 ### Terminal monitor
 
@@ -483,6 +515,7 @@ All settings live in `config.json` at the project root.
 | `batteries.<name>.protocol` | `"jbd"`, `"ecoworthy"`, or any other `aiobmsble` driver name. |
 | `batteries.<name>.label` | Display name on the dashboard. |
 | `batteries.<name>.persistent` | Hold one BLE link open instead of reconnecting each poll. Default `false`. |
+| `batteries.<name>.rated_capacity_ah` | The capacity the battery is *sold* as, e.g. `50`. Used as the denominator of the capacity readouts. Optional — falls back to the capacity the BMS itself reports as full. |
 | `polling.interval_seconds` | Pause between poll cycles. Default `10`. |
 | `polling.attempts` | Tries per battery per cycle before counting a miss. Default `2`. |
 | `polling.scan_timeout` | Seconds to look for a battery's advertisement. Default `8`. |
@@ -547,18 +580,29 @@ The dashboard exposes two read-only JSON endpoints, useful for integrations (e.g
 Returns a JSON object keyed by battery id (the key names from `config.json`'s `batteries` block). Each value contains:
 
 **Measurement fields.** Not every protocol reports every field; anything a protocol
-does not provide is `null` and renders as `—` (ECO-WORTHY has no cycle count):
+does not provide is `null` and renders as `—`. The **Reports** column below says which
+of the two protocols in this project supply each field:
 
-| Field | Type | Description |
-|---|---|---|
-| `voltage` | float | Pack voltage (V) |
-| `current` | float | Charge/discharge current (A) |
-| `power` | float | Instantaneous power (W) |
-| `soc` | int | State of charge (%) |
-| `temperature` | float\|null | BMS temperature (°C) |
-| `cells` | list[float] | Per-cell voltages (V) |
-| `delta_mv` | float | Max cell spread (mV) — JBD only |
-| `cycles` | int | Charge cycle count — JBD only |
+| Field | Type | Reports | Description |
+|---|---|---|---|
+| `voltage` | float | both | Pack voltage (V) |
+| `current` | float | both | Charge/discharge current (A) |
+| `power` | float | both | Instantaneous power (W) |
+| `soc` | int | both | State of charge (%) |
+| `temperature` | float\|null | both | Mean BMS temperature (°C) |
+| `temps` | list[float] | both | Each temperature sensor individually; `temperature` is their mean |
+| `cells` | list[float] | both | Per-cell voltages (V) |
+| `delta_mv` | float\|null | both | Max cell spread (mV) |
+| `capacity_ah` | float\|null | both | Amp-hours still available. A real coulomb-counted register on JBD; on ECO-WORTHY it is derived as `capacity_full_ah × soc/100`, so there it tracks SOC exactly and adds nothing SOC doesn't already tell you |
+| `capacity_full_ah` | int\|null | both | Amp-hours the BMS considers a full pack. Whole numbers only — the drivers floor-divide the register, so a battery your phone app shows as 52.02 Ah appears here as `52` |
+| `rated_ah` | float\|null | config | `rated_capacity_ah` from `config.json`, falling back to `capacity_full_ah` |
+| `energy_wh` | int\|null | both | Stored energy (Wh), i.e. `voltage × capacity_ah` |
+| `runtime_seconds` | int\|null | both | Estimated seconds to empty. Only derived while discharging; `null` when charging or idle |
+| `cycles` | int\|null | JBD | Charge cycle count |
+| `chrg_mosfet` | bool\|null | JBD | Charge MOSFET enabled |
+| `dischrg_mosfet` | bool\|null | JBD | Discharge MOSFET enabled |
+| `balancer` | bool\|int\|null | JBD | Balancer active (reported as a per-cell bit mask) |
+| `soh` | float\|null | ECO-WORTHY | State of health (%) |
 
 **Status fields** (always present):
 
@@ -569,6 +613,8 @@ does not provide is `null` and renders as `—` (ECO-WORTHY has no cycle count):
 | `misses` | int | Consecutive missed polls since the last good reading |
 | `stale` | bool | `true` when `misses >= STALE_AFTER_MISSES` |
 | `age_seconds` | int | Seconds elapsed since the last successful read |
+| `problem` | bool | `true` when the BMS raises a fault, or fails one of the library's sanity checks |
+| `problem_code` | int\|null | Raw fault code. Model-specific: this project does not decode it, and neither does `aiobmsble` |
 
 A battery that has never been read yet does not appear in the response at all.
 

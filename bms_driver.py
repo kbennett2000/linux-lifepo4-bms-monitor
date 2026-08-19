@@ -191,14 +191,23 @@ async def _find_device(address: str, timeout: float) -> BLEDevice | None:
 def sample_to_reading(address: str, data: dict) -> dict:
     """Flatten an aiobmsble ``BMSSample`` into the dict the UIs consume.
 
-    Two defaults here are load-bearing and must not be "tidied up":
+    The null-vs-zero rule here is load-bearing and must not be "tidied up":
 
     * ``soc`` falls back to ``0``, never ``None`` — ``dashboard.js`` interpolates it
       straight into the SOC ring, so a null would render the text "null" and force the
       low-charge red accent.
-    * ``temperature``, ``cycles`` and ``delta_mv`` fall back to ``None``, never ``0`` —
-      the UI renders "—" for absent values, and a ``0`` default would invent readings a
-      protocol does not actually report (ECO-WORTHY has no cycle count).
+    * **Every other scalar falls back to ``None``, never ``0``.** The UI renders "—" for
+      absent values, so a ``0`` default would invent readings a protocol does not
+      actually report — a fabricated "Cycles: 0" for ECO-WORTHY (which has no cycle
+      count), or a "SoH 0%" for JBD (which does not report health) reading as a dead
+      pack rather than as missing data.
+    * ``problem`` is the one exception, and is a genuine bool: ``BaseBMS`` always sets
+      it, deriving it from ``problem_code`` plus its own sanity checks, so ``False``
+      here means "the BMS says it is fine", not "unknown".
+
+    Values not read from the BMS directly are still trustworthy: ``BaseBMS``
+    back-fills ``cycle_charge``, ``cycle_capacity``, ``runtime`` and friends from the
+    fields a protocol *does* report, and only when their inputs are present.
     """
     def rounded(value, digits):
         return None if value is None else round(value, digits)
@@ -224,7 +233,49 @@ def sample_to_reading(address: str, data: dict) -> dict:
         "delta_mv": rounded(delta_v * 1000 if delta_v is not None else None, 1),
         "cycles": data.get("cycles"),
         "cells": cells,
+
+        # --- Capacity ---
+        # `cycle_charge` is a real coulomb-counted register on JBD, but on ECO-WORTHY it
+        # is derived by BaseBMS as design_capacity * SOC/100 — it tracks the SOC exactly
+        # and carries no extra information. See the README before over-trusting it.
+        "capacity_ah": rounded(data.get("cycle_charge"), 1),
+        # The BMS's own idea of a full pack. Both drivers floor-divide this by 100, so
+        # it lands on whole amp-hours: an ECO-WORTHY reporting 52.02 Ah reads as 52.
+        "capacity_full_ah": data.get("design_capacity"),
+        # Whole watt-hours: round(x, 0) would leave a float, and "721.0 Wh" in the API
+        # implies a precision the underlying reading does not have.
+        "energy_wh": (
+            None if data.get("cycle_capacity") is None
+            else round(data["cycle_capacity"])
+        ),
+
+        # --- Health / detail ---
+        "soh": rounded(data.get("battery_health"), 1),
+        # Only derived while discharging; None means "charging, idle, or not reported".
+        "runtime_seconds": data.get("runtime"),
+        "problem": bool(data.get("problem", False)),
+        "problem_code": data.get("problem_code"),
+        "chrg_mosfet": data.get("chrg_mosfet"),
+        "dischrg_mosfet": data.get("dischrg_mosfet"),
+        "balancer": data.get("balancer"),
+        # Individual sensors; `temperature` above is their mean.
+        "temps": [round(v, 1) for v in (data.get("temp_values") or [])],
     }
+
+
+def rated_capacity(entry: dict, reading: dict) -> float | None:
+    """Rated Ah for a battery: the config value, else the BMS's own design capacity.
+
+    Kept here rather than in each UI so the dashboard, terminal monitor and tray widget
+    can never disagree about what a capacity percentage is measured against. Returns
+    ``None`` when neither source knows, which the UIs render as "no capacity data"
+    rather than guessing.
+    """
+    configured = entry.get("rated_capacity_ah")
+    if configured:
+        return float(configured)
+    reported = reading.get("capacity_full_ah")
+    return float(reported) if reported else None
 
 
 async def read_battery(

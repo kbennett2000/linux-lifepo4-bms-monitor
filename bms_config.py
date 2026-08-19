@@ -42,6 +42,14 @@ def battery_entries(cfg: dict) -> dict:
     ``persistent`` asks the driver layer to hold one BLE connection open for that
     battery instead of reconnecting on every poll. It defaults to ``False`` so an
     existing ``config.json`` behaves exactly as before.
+
+    ``rated_capacity_ah`` is the capacity the battery is *sold* as, which is not what
+    the BMS reports: a 50 Ah ECO-WORTHY reports 52.02 Ah when full. Measuring against
+    the BMS's own number would peg every healthy pack at 100% by definition, so the
+    dashboard's capacity percentage uses this instead. It defaults to ``None`` rather
+    than a number — "not configured" has to stay distinguishable from "zero", because
+    the former falls back to the BMS's reported capacity and the latter would be a
+    divide-by-zero.
     """
     return {
         name: {
@@ -49,6 +57,9 @@ def battery_entries(cfg: dict) -> dict:
             "protocol": b["protocol"],
             "label": b.get("label", name),
             "persistent": bool(b.get("persistent", False)),
+            "rated_capacity_ah": (
+                float(b["rated_capacity_ah"]) if b.get("rated_capacity_ah") else None
+            ),
         }
         for name, b in cfg.get("batteries", {}).items()
     }

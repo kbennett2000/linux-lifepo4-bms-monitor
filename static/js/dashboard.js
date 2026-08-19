@@ -55,6 +55,32 @@
         return `${h}h ago`;
     }
 
+    // Estimated time to empty. The BMS layer only derives this while a pack is actually
+    // discharging, so charging and idle packs legitimately have nothing to show.
+    function formatRuntime(seconds) {
+        if (seconds === null || seconds === undefined || isNaN(seconds) || seconds <= 0) return '—';
+        const totalMin = Math.round(seconds / 60);
+        const h = Math.floor(totalMin / 60);
+        const m = totalMin % 60;
+        if (h >= 24) return `${Math.floor(h / 24)}d ${h % 24}h`;
+        return h ? `${h}h ${m}m` : `${m}m`;
+    }
+
+    function formatEnergy(wh) {
+        if (wh === null || wh === undefined || isNaN(wh)) return '—';
+        return wh >= 1000 ? `${(wh / 1000).toFixed(2)} kWh` : `${Math.round(wh)} Wh`;
+    }
+
+    // Percentage of *rated* capacity still available. Deliberately measured against the
+    // rated figure from config.json, not the capacity the BMS reports as full: a healthy
+    // pack often exceeds its rating (a 50Ah ECO-WORTHY reports 52Ah), and measuring
+    // against the BMS's own number would pin every healthy pack at exactly 100%.
+    // Returns null when either side is unknown, so callers can say so rather than guess.
+    function capacityPct(availAh, ratedAh) {
+        if (availAh === null || availAh === undefined || !(ratedAh > 0)) return null;
+        return (availAh / ratedAh) * 100;
+    }
+
     // ---- Render summary tiles ----
     function renderSummary(batteries) {
         const arr = Object.values(batteries);
@@ -69,8 +95,37 @@
         const avgVolt = arr.reduce((a, b) => a + (b.voltage || 0), 0) / arr.length;
         const flow = direction(totalCurrent);
 
+        // Bank capacity. This is the size-weighted counterpart to Avg SOC above: a 50Ah
+        // pack moves the unweighted average exactly as much as a 330Ah one, which is not
+        // what "how much is left in the bank" means.
+        const usable = arr.filter(b => b.rated_ah > 0 && b.capacity_ah !== null && b.capacity_ah !== undefined);
+        const availAh = usable.reduce((a, b) => a + b.capacity_ah, 0);
+        const ratedAh = usable.reduce((a, b) => a + b.rated_ah, 0);
+        const capPct = capacityPct(usable.length ? availAh : null, ratedAh);
+
+        // A battery without capacity data drops out of *both* sums, so the percentage
+        // would still look perfectly plausible while covering fewer packs than it
+        // appears to. Say so rather than quietly reweighting.
+        let capSub;
+        if (!usable.length) {
+            capSub = 'no capacity data';
+        } else {
+            capSub = `${fmt(availAh, 1)} / ${fmt(ratedAh, 0)} Ah`;
+            if (usable.length < arr.length) {
+                capSub += ` · ${usable.length} of ${arr.length} packs`;
+            }
+        }
+
         const tiles = [
             { label: 'Avg SOC', value: `${avgSoc}%`, accent: socAccent(avgSoc).text },
+            {
+                label: 'Capacity',
+                value: capPct === null ? '—' : `${Math.round(capPct)}%`,
+                accent: capPct === null
+                    ? 'text-slate-400 dark:text-slate-500'
+                    : socAccent(capPct).text,
+                sub: capSub,
+            },
             { label: 'Net Power', value: `${fmt(totalPower, 1)} W`, accent: flow.cls === 'dir-charging' ? 'text-emerald-500 dark:text-emerald-400' : flow.cls === 'dir-discharging' ? 'text-pink-500 dark:text-pink-400' : 'text-slate-600 dark:text-slate-300' },
             { label: 'Avg Voltage', value: `${fmt(avgVolt, 2)} V`, accent: 'text-slate-700 dark:text-slate-200' },
             { label: 'Batteries', value: `${arr.length}`, accent: 'text-slate-700 dark:text-slate-200' },
@@ -80,6 +135,7 @@
             <div class="summary-tile">
                 <div class="text-xs uppercase tracking-wider text-slate-500 dark:text-slate-400">${t.label}</div>
                 <div class="mt-1 text-2xl font-semibold ${t.accent}">${t.value}</div>
+                ${t.sub ? `<div class="tile-sub">${t.sub}</div>` : ''}
             </div>
         `).join('');
     }
@@ -90,6 +146,51 @@
         return m <= 1 ? 'under a minute left' : `${m}m left`;
     }
 
+    // Capacity bar. Omitted entirely for a protocol that reports no capacity, rather than
+    // rendering an empty bar that reads as "zero charge left".
+    function capacityBlock(d) {
+        if (d.capacity_ah === null || d.capacity_ah === undefined) return '';
+
+        const pct = capacityPct(d.capacity_ah, d.rated_ah);
+        // The bar is clamped to full, but the text beside it is not — a pack above its
+        // rated capacity should say 104%, not be quietly rounded down to look ordinary.
+        // With no rating to measure against there is no bar at all: an empty one under a
+        // real amp-hour figure reads as "0% left", which is the opposite of the truth.
+        const detail = pct === null
+            ? `${fmt(d.capacity_ah, 1)} Ah`
+            : `${fmt(d.capacity_ah, 1)} Ah · ${Math.round(pct)}% of ${fmt(d.rated_ah, 0)} Ah`;
+        const bar = pct === null
+            ? ''
+            : `<div class="cap-bar"><div class="fill" style="width:${Math.max(2, Math.min(100, pct)).toFixed(1)}%"></div></div>`;
+
+        return `
+            <div class="mb-6">
+                <div class="flex items-center justify-between${bar ? ' mb-2' : ''}">
+                    <div class="text-xs uppercase tracking-wider text-slate-500 dark:text-slate-400">Capacity</div>
+                    <div class="text-xs text-slate-500 dark:text-slate-400 font-mono">${detail}</div>
+                </div>
+                ${bar}
+            </div>`;
+    }
+
+    // Charge/discharge MOSFET and balancer state. Each chip is skipped when its protocol
+    // doesn't report it, so an ECO-WORTHY card doesn't grow three permanent em-dashes.
+    function switchChips(d) {
+        const chips = [
+            ['CHG', d.chrg_mosfet],
+            ['DSG', d.dischrg_mosfet],
+            ['BAL', d.balancer],
+        ].filter(([, v]) => v !== null && v !== undefined);
+
+        if (!chips.length) return '';
+        return `
+            <div class="mt-3 flex flex-wrap gap-1.5">
+                ${chips.map(([name, v]) =>
+                    `<span class="state-chip ${v ? 'is-on' : 'is-off'}">${name} ${v ? '✓' : '✕'}</span>`
+                ).join('')}
+            </div>`;
+    }
+
     function renderCard(name, d) {
         const accent = socAccent(d.soc);
         const dir = direction(d.current);
@@ -97,6 +198,7 @@
         // A released battery is intentionally handed to the phone app, so don't
         // also flag it as stale — that reads as a fault.
         const stale = !!d.stale && !released;
+        const problem = !!d.problem;
         const circumference = 2 * Math.PI * 45;
         const offset = circumference - (Math.max(0, Math.min(100, d.soc)) / 100) * circumference;
 
@@ -114,6 +216,16 @@
                 </div>`;
         }).join('');
 
+        // Fault codes are a BMS-specific bit field with no documented meaning in this
+        // project, so show the raw value both ways — the bit position is what identifies
+        // the fault, and hex makes that readable.
+        const code = d.problem_code;
+        const codeText = (code === null || code === undefined)
+            ? ''
+            : ` · code ${code} (0x${Number(code).toString(16).toUpperCase()})`;
+
+        const temps = d.temps || [];
+
         return `
         <article class="bms-card flex flex-col${stale ? ' stale' : ''}">
             <div class="flex items-start justify-between gap-3 mb-5">
@@ -122,8 +234,12 @@
                     <p class="text-xs text-slate-500 dark:text-slate-500 font-mono mt-0.5">${d.address}</p>
                     ${stale ? `<p class="stale-note">⚠ stale · last seen ${formatAge(d.age_seconds)}</p>` : ''}
                     ${released ? `<p class="release-note">📱 released for phone app · ${releaseLabel(d.release_seconds_left)}</p>` : ''}
+                    ${problem ? `<p class="problem-note" title="Raised by the BMS itself. Code meanings are model-specific and are not decoded here — check your battery's app or manual.">⚠ BMS fault flag set${codeText}</p>` : ''}
                 </div>
-                <span class="dir-badge ${released ? 'dir-released' : (stale ? 'dir-stale' : dir.cls)}">${released ? 'Released' : (stale ? 'Stale' : `${dir.arrow} ${dir.label}`)}</span>
+                <div class="flex flex-wrap justify-end items-start gap-1.5 shrink-0">
+                    ${problem ? '<span class="dir-badge dir-problem">⚠ Fault</span>' : ''}
+                    <span class="dir-badge ${released ? 'dir-released' : (stale ? 'dir-stale' : dir.cls)}">${released ? 'Released' : (stale ? 'Stale' : `${dir.arrow} ${dir.label}`)}</span>
+                </div>
             </div>
 
             <div class="flex items-center gap-5 mb-6">
@@ -157,9 +273,12 @@
                     <div>
                         <div class="text-xs text-slate-500 dark:text-slate-400">Temp</div>
                         <div class="text-xl font-semibold metric-value">${d.temperature != null ? fmt(d.temperature, 1) : '—'} <span class="text-xs text-slate-500">°C</span></div>
+                        ${temps.length > 1 ? `<div class="metric-sub" title="Individual temperature sensors">${temps.map(t => t.toFixed(1)).join(' / ')}</div>` : ''}
                     </div>
                 </div>
             </div>
+
+            ${capacityBlock(d)}
 
             <div>
                 <div class="flex items-center justify-between mb-2">
@@ -171,10 +290,15 @@
                 <div class="flex gap-1.5 h-24">${cellHtml || '<div class="text-xs text-slate-400">No cell data</div>'}</div>
             </div>
 
-            <div class="mt-5 pt-4 border-t border-slate-200 dark:border-slate-700/60 flex justify-between text-xs text-slate-500 dark:text-slate-400">
-                <div>Cycles: <span class="text-slate-700 dark:text-slate-200 font-medium">${d.cycles ?? '—'}</span></div>
-                <div>ΔV: <span class="text-slate-700 dark:text-slate-200 font-medium">${d.delta_mv != null ? d.delta_mv + ' mV' : '—'}</span></div>
+            <div class="mt-5 pt-4 border-t border-slate-200 dark:border-slate-700/60 grid grid-cols-3 gap-x-3 gap-y-2 text-xs text-slate-500 dark:text-slate-400">
+                <div>Cycles: <span class="stat-value">${d.cycles ?? '—'}</span></div>
+                <div>ΔV: <span class="stat-value">${d.delta_mv != null ? d.delta_mv + ' mV' : '—'}</span></div>
+                <div>SoH: <span class="stat-value">${d.soh != null ? fmt(d.soh, 0) + '%' : '—'}</span></div>
+                <div>Stored: <span class="stat-value">${formatEnergy(d.energy_wh)}</span></div>
+                <div class="col-span-2">Runtime: <span class="stat-value">${formatRuntime(d.runtime_seconds)}</span></div>
             </div>
+
+            ${switchChips(d)}
 
             ${d.releasable ? `
             <div class="mt-3 flex justify-end">

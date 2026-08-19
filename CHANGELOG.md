@@ -28,6 +28,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (module-global packet buffers were never reset between cycles).
 
 ### Added
+- **Capacity in amp-hours, everywhere.** Each card gets a capacity bar (available Ah, and what
+  share of the pack's rating that is), and the summary strip gets a **Capacity** tile for the
+  bank as a whole. Unlike Avg SOC, which weights a 50 Ah pack the same as a 330 Ah one, this is
+  size-weighted — it is the number that says how much is actually left.
+- **`batteries.<name>.rated_capacity_ah`** in `config.json` — the capacity a battery is *sold*
+  as, used as the denominator above. Optional; falls back to the capacity the BMS reports as
+  full. Measuring against the rating rather than the BMS's own figure means a healthy pack can
+  read slightly over 100%, which is the point: a 50 Ah ECO-WORTHY reports 52 Ah full.
+- **The rest of the fields the BMS drivers already returned** and this project was discarding:
+  state of health, stored energy (Wh), estimated runtime to empty, charge/discharge MOSFET and
+  balancer state, and each temperature sensor individually rather than only their mean.
+- **BMS fault indicator** — a card now shows a ⚠ Fault badge and the raw `problem_code` when
+  the battery itself reports a problem. This was previously invisible in every front-end.
 - **`bms_driver.py`** — one shared BLE layer for all three front-ends. `protocol` now accepts
   any [`aiobmsble`](https://pypi.org/p/aiobmsble/) driver name (`"daly"`, `"jikong"`, …), and
   an unrecognised value stops the dashboard at startup instead of silently routing to a

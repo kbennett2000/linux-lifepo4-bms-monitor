@@ -271,6 +271,11 @@ def background_updater():
                         if result:
                             # Fresh reading: store it and reset the miss counter.
                             result["label"] = labels.get(name, name)
+                            # Rated capacity is config, not battery data, so it is merged
+                            # here alongside the label rather than inside the driver.
+                            result["rated_ah"] = bms_driver.rated_capacity(
+                                ENTRIES[name], result
+                            )
                             result["last_seen"] = now
                             result["misses"] = 0
                             latest_data[name] = result
@@ -342,18 +347,55 @@ DEMO_BATTERIES = {
         "voltage": 13.21, "current": -22.4, "power": -295.9, "soc": 85,
         "temperature": 23.5, "delta_mv": 4.0, "cycles": 142,
         "cells": [3.301, 3.305, 3.302, 3.303], "label": "House Bank · 200Ah",
+        # A slightly aged pack: the BMS's own full capacity has drifted below rated.
+        "rated_ah": 200, "capacity_ah": 167.5, "capacity_full_ah": 198,
+        "energy_wh": 2213, "soh": None, "runtime_seconds": 26920,
+        "problem": False, "problem_code": 0,
+        "chrg_mosfet": True, "dischrg_mosfet": True, "balancer": False,
+        "temps": [23.2, 23.8],
     },
     "solar_200ah": {
         "address": "A4:C1:37:55:C2:29",
         "voltage": 14.05, "current": 18.6, "power": 261.3, "soc": 92,
         "temperature": 25.1, "delta_mv": 3.0, "cycles": 88,
         "cells": [3.512, 3.514, 3.511, 3.513], "label": "Solar Array · 200Ah",
+        "rated_ah": 200, "capacity_ah": 184.6, "capacity_full_ah": 200,
+        "energy_wh": 2594, "soh": None,
+        # Charging, so there is no time-to-empty to report.
+        "runtime_seconds": None,
+        "problem": False, "problem_code": 0,
+        "chrg_mosfet": True, "dischrg_mosfet": True, "balancer": True,
+        "temps": [24.8, 25.4],
     },
+    # Deliberately the drawn-down pack, and deliberately the *largest* one: it is what
+    # makes the Capacity tile differ from Avg SOC (69% vs 79%). Keep them divergent if
+    # you edit these numbers, or the demo stops demonstrating anything.
     "reserve_330ah": {
         "address": "A4:C1:37:25:C4:4D",
-        "voltage": 13.40, "current": 0.0, "power": 0.0, "soc": 99,
+        "voltage": 13.05, "current": 0.0, "power": 0.0, "soc": 40,
         "temperature": 22.0, "delta_mv": 2.0, "cycles": 37,
-        "cells": [3.349, 3.351, 3.350, 3.350], "label": "Reserve · 330Ah",
+        "cells": [3.262, 3.264, 3.263, 3.263], "label": "Reserve · 330Ah",
+        "rated_ah": 330, "capacity_ah": 132.4, "capacity_full_ah": 331,
+        "energy_wh": 1728, "soh": None, "runtime_seconds": None,
+        "problem": False, "problem_code": 0,
+        "chrg_mosfet": True, "dischrg_mosfet": True, "balancer": False,
+        "temps": [22.0],
+    },
+    # A second protocol, so the demo also covers the fields JBD does *not* report and
+    # the ones it does not: SoH present, cycle count absent, and a healthy pack sitting
+    # above its rated capacity (sold as 50 Ah, reports 52 Ah full).
+    "utility_50ah": {
+        "address": "E2:E7:79:8A:56:A3",
+        "voltage": 13.86, "current": -3.2, "power": -44.4, "soc": 100,
+        "temperature": 34.5, "delta_mv": 12.0, "cycles": None,
+        "cells": [3.462, 3.468, 3.456, 3.474], "label": "Utility · 50Ah",
+        # Sold as 50 Ah, reports 52 Ah full — so a full pack reads 104%, not 100%.
+        "rated_ah": 50, "capacity_ah": 52.0, "capacity_full_ah": 52,
+        "energy_wh": 721, "soh": 100.0, "runtime_seconds": 58500,
+        "problem": False, "problem_code": 0,
+        # This protocol reports neither MOSFET states nor balancer status.
+        "chrg_mosfet": None, "dischrg_mosfet": None, "balancer": None,
+        "temps": [35.5, 33.5],
     },
 }
 
