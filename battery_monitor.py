@@ -129,6 +129,7 @@ async def read_and_print(name, entry):
         entry["address"],
         entry["protocol"],
         persistent=False,          # the terminal view is short-lived; don't hold links
+        adapter=entry["adapter"],
         scan_timeout=POLLING["scan_timeout"],
         log=lambda msg: print(f"   {msg}"),
     )

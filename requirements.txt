@@ -3,10 +3,19 @@
 # =============================================================================
 
 # Core Bluetooth Low Energy library
-bleak>=0.21.0
+bleak>=3.0.2
 
-# Library with built-in support for JBD/Jiabaida BMS
-aiobmsble>=0.21.0
+# BMS drivers (JBD/Jiabaida, ECO-WORTHY, and ~45 others).
+#
+# 0.28.0 is a floor, not a preference. Every release between 0.23 and 0.28 fixed
+# something this project was hitting on a flaky adapter:
+#   0.24  a hard timeout around connect, because a BlueZ D-Bus stall could hang the
+#         poll loop indefinitely — bleak_retry_connector's own timeouts do not fire
+#         for it; and disconnect(reset=True) now closes stale connections
+#   0.27  an operation lock, so a read and a teardown cannot overlap
+# It also replaced the `keep_alive=` constructor argument with a `BMSConfig` object;
+# bms_driver detects both, so an older install keeps working.
+aiobmsble>=0.28.0
 
 # Lightweight web framework for the beautiful dashboard
 flask>=3.0.0
@@ -17,8 +26,8 @@ flask>=3.0.0
 # also use to discover the adapter's hci index + MAC.
 bluetooth-auto-recovery>=1.6.0
 
-# Optional: If you want to pin exact versions for maximum reproducibility:
-# bleak==0.21.1
-# aiobmsble==0.21.0
+# Optional: pin exact versions for maximum reproducibility.
+# bleak==3.0.2
+# aiobmsble==0.28.0
 # flask==3.0.3
 # bluetooth-auto-recovery==1.6.4

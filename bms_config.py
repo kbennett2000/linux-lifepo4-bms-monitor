@@ -36,20 +36,47 @@ def battery_tuples(cfg: dict) -> dict:
     }
 
 
+def _opt_float(value):
+    """Coerce to float, mapping absent/blank/zero to None ("not configured")."""
+    return float(value) if value else None
+
+
+def _opt_int(value):
+    return int(value) if value else None
+
+
 def battery_entries(cfg: dict) -> dict:
     """Return the full per-battery record, with defaults filled in.
 
-    ``persistent`` asks the driver layer to hold one BLE connection open for that
-    battery instead of reconnecting on every poll. It defaults to ``False`` so an
-    existing ``config.json`` behaves exactly as before.
+    Per-battery keys beyond ``address`` and ``protocol``:
 
-    ``rated_capacity_ah`` is the capacity the battery is *sold* as, which is not what
-    the BMS reports: a 50 Ah ECO-WORTHY reports 52.02 Ah when full. Measuring against
-    the BMS's own number would peg every healthy pack at 100% by definition, so the
-    dashboard's capacity percentage uses this instead. It defaults to ``None`` rather
-    than a number — "not configured" has to stay distinguishable from "zero", because
-    the former falls back to the BMS's reported capacity and the latter would be a
-    divide-by-zero.
+    ``persistent``
+        Hold one BLE connection open instead of reconnecting every poll. Defaults
+        to ``False``. This is a per-adapter judgement call, not a per-battery one:
+        a held link is the upstream recommendation and is right on a *dedicated*
+        adapter, but on an adapter that intermittently stops returning
+        advertisements it guarantees the link is open when the adapter wedges.
+        See ``docs/adr/0003-*`` before changing it.
+
+    ``rated_capacity_ah``
+        The capacity the battery is *sold* as, which is not what the BMS reports:
+        a 50 Ah ECO-WORTHY reports 52.02 Ah full. Used as the denominator of the
+        capacity readouts so a healthy pack can read above 100%. ``None`` when
+        unset, which falls back to the BMS's own reported capacity.
+
+    ``interval_seconds`` / ``attempts``
+        Per-battery overrides of the matching ``polling`` values, so one fragile
+        battery can be polled rarely without slowing the whole bank down.
+
+    ``adapter``
+        Which host adapter to use, e.g. ``"hci1"``. ``None`` means the default.
+        Scanning, connecting and adapter recovery are all grouped by this value.
+
+    ``health_gated``
+        Skip this battery's reads for a while after an adapter-level fault
+        (a whole-bank scan outage, an adapter recovery, or a bluetoothd restart).
+        For a battery whose BLE module does not survive an unclean link loss,
+        not connecting during a sick period is worth more than the missed reading.
     """
     return {
         name: {
@@ -57,22 +84,49 @@ def battery_entries(cfg: dict) -> dict:
             "protocol": b["protocol"],
             "label": b.get("label", name),
             "persistent": bool(b.get("persistent", False)),
-            "rated_capacity_ah": (
-                float(b["rated_capacity_ah"]) if b.get("rated_capacity_ah") else None
-            ),
+            "rated_capacity_ah": _opt_float(b.get("rated_capacity_ah")),
+            # None => inherit the corresponding polling default.
+            "interval_seconds": _opt_float(b.get("interval_seconds")),
+            "attempts": _opt_int(b.get("attempts")),
+            "adapter": b.get("adapter") or None,
+            "health_gated": bool(b.get("health_gated", False)),
         }
         for name, b in cfg.get("batteries", {}).items()
     }
 
 
-# Defaults chosen to match the previously hard-coded behaviour, so adding the optional
-# "polling" block to config.json is the only way to change any of them.
+def adapters(entries: dict) -> list:
+    """Distinct adapters in use, in config order. ``None`` = the default adapter."""
+    seen = []
+    for entry in entries.values():
+        if entry["adapter"] not in seen:
+            seen.append(entry["adapter"])
+    return seen
+
+
+def batteries_on(entries: dict, adapter) -> dict:
+    """The subset of ``entries`` bound to one adapter."""
+    return {n: e for n, e in entries.items() if e["adapter"] == adapter}
+
+
+# Defaults for the optional "polling" block in config.json.
+#
+# `interval_seconds` is 30 rather than the original 10 to match the reference
+# deployment of these same drivers (Home Assistant's bms_ble polls every 30 s).
+# Polling three batteries every 10 s, each with its own active scan, is a large
+# continuous load on one adapter and this bank's adapter does not tolerate it.
 _POLLING_DEFAULTS = {
-    "interval_seconds": 10,     # pause between poll cycles
-    "attempts": 2,              # tries per battery per cycle before counting a miss
-    "scan_timeout": 8.0,        # seconds to look for a battery's advertisement
-    "release_minutes": 5,       # default hold-off when releasing a battery to a phone app
-    "release_max_minutes": 30,  # clamp, so a bad request can't release it indefinitely
+    "interval_seconds": 30,          # pause between poll cycles
+    "attempts": 2,                   # tries per battery per cycle before counting a miss
+    "scan_timeout": 8.0,             # seconds to look for advertisements
+    "release_minutes": 5,            # default hold-off when releasing to a phone app
+    "release_max_minutes": 30,       # clamp, so a bad request can't release indefinitely
+    "recover_after_misses": 3,       # consecutive misses before a battery counts as missing
+    "recover_cooldown_minutes": 30,  # minimum gap between adapter recovery attempts
+    "recover_stale_minutes": 60,     # a battery unseen this long stops counting toward recovery
+    "health_gate_minutes": 15,       # quiet period required after an adapter fault
+    "backoff_max_minutes": 10,       # ceiling on per-battery failure backoff
+    "telemetry_samples": 500,        # per-battery samples retained on disk (0 disables)
 }
 
 
@@ -84,3 +138,13 @@ def polling_config(cfg: dict) -> dict:
         if key in block:
             resolved[key] = type(default)(block[key])
     return resolved
+
+
+def battery_interval(entry: dict, polling: dict) -> float:
+    """Seconds between reads for one battery (its override, else the default)."""
+    return float(entry.get("interval_seconds") or polling["interval_seconds"])
+
+
+def battery_attempts(entry: dict, polling: dict) -> int:
+    """Read attempts per cycle for one battery (its override, else the default)."""
+    return int(entry.get("attempts") or polling["attempts"])

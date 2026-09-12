@@ -8,6 +8,7 @@
     const emptyStateText = document.getElementById('empty-state-text');
     const lastUpdated = document.getElementById('last-updated');
     const statusDot = document.getElementById('status-dot');
+    const adapterHealth = document.getElementById('adapter-health');
 
     const EMPTY_TEXT_WAITING = 'Waiting for first battery reading…';
     const EMPTY_TEXT_HELP =
@@ -79,6 +80,48 @@
     function capacityPct(availAh, ratedAh) {
         if (availAh === null || availAh === undefined || !(ratedAh > 0)) return null;
         return (availAh / ratedAh) * 100;
+    }
+
+    // ---- Adapter health ----
+    // Shown only when an adapter has had a recent fault. A whole-adapter fault is a
+    // different thing from a battery being unreachable: it takes every battery down
+    // at once, and the power-cycle used to clear it can strand a peripheral that had
+    // a connection open. Surfacing it here means a bad night is visible in the UI
+    // instead of only in the journal.
+    function renderHealth(payload) {
+        if (!adapterHealth) return;
+        const rows = (payload && payload.adapters) || [];
+        const unhealthy = rows.filter(a => !a.healthy && a.last_fault_seconds_ago !== null);
+        if (!unhealthy.length) {
+            adapterHealth.classList.add('hidden');
+            adapterHealth.innerHTML = '';
+            return;
+        }
+        adapterHealth.classList.remove('hidden');
+        adapterHealth.innerHTML = unhealthy.map(a => {
+            const mins = Math.round(a.last_fault_seconds_ago / 60);
+            const when = mins < 1 ? 'just now' : `${mins}m ago`;
+            const what = [];
+            if (a.last_outage) what.push('scan outage');
+            if (a.last_recovery) what.push('adapter reset');
+            if (a.last_stack_restart) what.push('bluetoothd restart');
+            return `
+                <div class="adapter-warning">
+                    <span class="adapter-warning-title">⚠ ${a.adapter}</span>
+                    <span>recent fault ${when}${what.length ? ' · ' + what.join(', ') : ''}</span>
+                    ${a.recovery_count ? `<span class="adapter-warning-count">${a.recovery_count} reset${a.recovery_count === 1 ? '' : 's'} this run</span>` : ''}
+                </div>`;
+        }).join('');
+    }
+
+    async function tickHealth() {
+        try {
+            const res = await fetch('/api/health');
+            renderHealth(await res.json());
+        } catch (e) {
+            // The health endpoint is advisory; a failure here must not disturb the
+            // battery view, which has its own error handling.
+        }
     }
 
     // ---- Render summary tiles ----
@@ -370,5 +413,8 @@
     }
 
     tick();
+    tickHealth();
     setInterval(tick, refreshSeconds * 1000);
+    // Adapter health changes on the scale of minutes, not seconds.
+    setInterval(tickHealth, Math.max(30, refreshSeconds * 4) * 1000);
 })();

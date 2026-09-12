@@ -151,6 +151,7 @@ class BatteryTray:
                             entry["address"],
                             entry["protocol"],
                             persistent=False,
+                            adapter=entry["adapter"],
                             scan_timeout=_POLLING["scan_timeout"],
                         )
                     )

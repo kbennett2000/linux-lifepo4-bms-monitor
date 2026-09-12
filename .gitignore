@@ -9,3 +9,6 @@ env/
 # OS / editor
 .DS_Store
 *.swp
+
+# Runtime telemetry written by the dashboard (readings + adapter events).
+state/

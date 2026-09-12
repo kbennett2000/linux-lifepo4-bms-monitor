@@ -224,36 +224,33 @@ You'll see this:
 - `address` — the MAC address from Step 4
 - `protocol` — `"jbd"` for almost everything, or `"ecoworthy"` for ECO-WORTHY brand. Any other [`aiobmsble` driver](https://pypi.org/p/aiobmsble/) name also works (`"daly"`, `"jikong"`, …); an unrecognised value now stops the dashboard at startup instead of silently never reporting.
 - `label` — whatever name you want shown on the dashboard
-- `persistent` — optional, default `false`. Hold one BLE connection open for this battery instead of reconnecting every poll. **Recommended for ECO-WORTHY** (see the note below).
+- `persistent` — optional, default `false`. Hold one BLE connection open for this battery instead of reconnecting every poll. Right on a **dedicated** Bluetooth adapter; wrong on an adapter that also serves other batteries and occasionally wedges. See the note below.
 - `rated_capacity_ah` — optional. The capacity the battery is sold as, e.g. `200`. It is what the dashboard's capacity readouts are measured against. Leave it out and the battery's own reported full capacity is used instead, which works but hides the difference between rated and actual.
 
-> **ECO-WORTHY note:** these modules accept a single BLE client at a time and some
-> firmware revisions stop advertising for good if a connection is torn down without
-> being closed properly — recoverable only by discharging the pack to cutoff and
-> recharging it. Setting `"persistent": true` makes the dashboard hold one link (the
-> way the phone app does) instead of reconnecting a thousand-plus times a day, and
-> every disconnect unsubscribes first. Use the **Release for phone app** button on the
-> card when you want to use the official app.
-
-To check that a battery is understood before wiring it in, probe it directly:
-
-```bash
-python3 tools/test_ecoworthy.py -v            # first ecoworthy battery in config.json
-python3 tools/test_ecoworthy.py AA:BB:CC:DD:EE:FF --protocol jbd
-```
-
-If `-v` prints `invalid checksum` lines, the driver is reaching your battery but
-rejecting its frames — that is a hardware-revision difference worth reporting to
-[`aiobmsble`](https://github.com/patman15/aiobmsble/issues).
-
-You can also change:
-
-- `server.port` — defaults to **8040**. Pick another if 8040 is in use.
-- `ui.*` — the title, subtitle, footer text shown on the dashboard.
-- `ui.refresh_seconds` — how often the page refreshes.
-- `ui.default_theme` — `"system"`, `"light"`, or `"dark"`. Users can override with the toggle.
-
-Save and exit nano: **Ctrl+O**, **Enter**, **Ctrl+X**.
+> **ECO-WORTHY note — read this before enabling `persistent`.** These modules accept a
+> single BLE client at a time, and this one does not appear to resume advertising after a
+> connection ends *uncleanly* — it stays silent until the BMS is power-cycled, which in
+> practice means discharging the pack to low-voltage cutoff and recharging it. Holding a
+> link open around the clock maximises the chance of being connected when the adapter
+> wedges or the Bluetooth daemon crashes, so on a **shared** adapter this battery is
+> configured the other way: no held link, a long interval, one attempt, and reads skipped
+> for a while after any adapter-level fault.
+>
+> ```json
+> "ecoworthy": {
+>   "address": "E2:E7:79:8A:56:A3", "protocol": "ecoworthy", "label": "ECO-WORTHY",
+>   "rated_capacity_ah": 50,
+>   "persistent": false, "interval_seconds": 600, "attempts": 1, "health_gated": true
+> }
+> ```
+>
+> On a **dedicated** Bluetooth adapter (`"adapter": "hci1"`), the opposite is right:
+> `"persistent": true`, which is what the driver library recommends and what works well on
+> a radio that isn't also serving three other batteries and your WiFi. The full reasoning,
+> including what evidence would reverse it, is in
+> [ADR 0003](docs/adr/0003-ecoworthy-link-exposure.md).
+>
+> Use the **Release for phone app** button on the card when you want the official app.
 
 ---
 
@@ -440,6 +437,10 @@ RestartSec=10
 # some BMS modules stop advertising until they are power-cycled.
 TimeoutStopSec=30
 KillMode=mixed
+# Log unbuffered. Python block-buffers print() to a pipe, so without this, log lines
+# sit in the process for hours and are lost when it is killed — which is how the record
+# of thousands of adapter recoveries went missing and produced a wrong diagnosis.
+Environment=PYTHONUNBUFFERED=1
 # Allow the dashboard to recover a wedged BLE adapter on its own (see below).
 AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
 CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
@@ -516,11 +517,21 @@ All settings live in `config.json` at the project root.
 | `batteries.<name>.label` | Display name on the dashboard. |
 | `batteries.<name>.persistent` | Hold one BLE link open instead of reconnecting each poll. Default `false`. |
 | `batteries.<name>.rated_capacity_ah` | The capacity the battery is *sold* as, e.g. `50`. Used as the denominator of the capacity readouts. Optional — falls back to the capacity the BMS itself reports as full. |
-| `polling.interval_seconds` | Pause between poll cycles. Default `10`. |
+| `batteries.<name>.interval_seconds` | Poll this battery on its own schedule instead of `polling.interval_seconds`. Use it to read a fragile battery rarely without slowing the bank. |
+| `batteries.<name>.attempts` | Per-battery override of `polling.attempts`. `1` means no retry, which is right for a battery that reacts badly to repeated connects. |
+| `batteries.<name>.adapter` | Which host adapter to use, e.g. `"hci1"`. Omit for the default. Scanning, connecting and recovery are all grouped per adapter. |
+| `batteries.<name>.health_gated` | Skip this battery's reads for a while after an *adapter-level* fault (see `polling.health_gate_minutes`). |
+| `polling.interval_seconds` | Pause between poll cycles. Default `30` — matching the reference deployment of these drivers. Polling faster puts a lot of continuous load on one adapter. |
 | `polling.attempts` | Tries per battery per cycle before counting a miss. Default `2`. |
 | `polling.scan_timeout` | Seconds to look for a battery's advertisement. Default `8`. |
 | `polling.release_minutes` | Default duration of a "release for phone app". Default `5`. |
 | `polling.release_max_minutes` | Upper clamp on a release request. Default `30`. |
+| `polling.recover_after_misses` | Consecutive missed reads before a battery counts as missing for recovery purposes. Default `3`. |
+| `polling.recover_cooldown_minutes` | Minimum gap between adapter recovery attempts. Default `30`. |
+| `polling.recover_stale_minutes` | A battery unseen for longer than this stops counting toward recovery, so a dead battery can't keep the adapter power-cycling. Default `60`. |
+| `polling.health_gate_minutes` | How long `health_gated` batteries sit out after an adapter fault. Default `15`. |
+| `polling.backoff_max_minutes` | Ceiling on the per-battery failure backoff. Default `10`. |
+| `polling.telemetry_samples` | Readings retained in `state/telemetry.jsonl`. `0` disables telemetry. Default `500`. |
 
 Two ways to override the port or host without editing `config.json`:
 
@@ -540,16 +551,72 @@ After editing `config.json`, restart the dashboard (or `sudo systemctl restart b
 
 ## Advanced tuning
 
-These four constants are defined at the top of `dashboard.py`. They are **not** in `config.json` — edit `dashboard.py` directly to change them.
+Almost everything tunable now lives in the `polling` block of `config.json` (see the table
+above) or per battery. Two constants remain in `dashboard.py`:
 
 | Constant | Default | What it controls |
 |---|---|---|
-| `STALE_AFTER_MISSES` | `1` | Consecutive missed polls before a battery's card is shown as stale/dimmed. |
-| `FETCH_ATTEMPTS` | `2` | Read attempts per battery per cycle before it counts as a miss. |
-| `RECOVER_AFTER_MISSES` | `3` | Consecutive misses before the BLE adapter is power-cycled. |
-| `RECOVER_COOLDOWN_SECONDS` | `300` | Minimum seconds between adapter-recovery attempts. |
+| `STALE_AFTER_MISSES` | `1` | Consecutive missed reads before a battery's card is shown as stale/dimmed. |
+| `RECOVER_VERIFY_SECONDS` | `120` | How long to wait for *anything* to advertise after an adapter recovery before escalating to a USB re-enumeration. |
 
-> **Common tweak:** bump `STALE_AFTER_MISSES` to `2` to reduce single-miss flicker on a marginal signal — the card won't dim until two polls in a row fail.
+> **Common tweak:** bump `STALE_AFTER_MISSES` to `2` to reduce single-miss flicker on a
+> marginal signal — the card won't dim until two reads in a row fail.
+
+> **If a battery is fragile,** prefer per-battery `interval_seconds` and `attempts` over
+> slowing the whole bank down. `attempts: 1` is right for a battery that reacts badly to
+> repeated connection attempts.
+
+---
+
+## Keeping the Bluetooth stack healthy
+
+Most "the battery disappeared" problems on Linux are the host's Bluetooth stack, not the
+battery. Three things are worth doing on any server that runs this around the clock.
+
+**1. Check for a patched BlueZ.** BlueZ 5.85 has a use-after-free in GATT client teardown
+that crashes `bluetoothd` when a device disconnects
+([LP #2164630](https://bugs.launchpad.net/ubuntu/+source/bluez/+bug/2164630)). On Ubuntu
+26.04 the fix is `5.85-4ubuntu0.2`:
+
+```bash
+bluetoothctl --version                      # what you have
+apt-cache policy bluez                      # what's available
+# If you're on 5.85-4ubuntu0.1 and 0.2 is only in -proposed, enable it for bluez alone:
+echo 'deb http://archive.ubuntu.com/ubuntu resolute-proposed main' |   sudo tee /etc/apt/sources.list.d/proposed.list
+printf 'Package: *\nPin: release a=resolute-proposed\nPin-Priority: 100\n' |   sudo tee /etc/apt/preferences.d/proposed-low
+sudo apt update && sudo apt install -t resolute-proposed bluez
+```
+
+The low pin priority means *only* the package you name explicitly comes from `-proposed`.
+Do **not** simply install the newest upstream BlueZ: 5.87 carries two crashes of its own in
+the LE-disconnect and discovery-filter paths that this workload exercises constantly.
+
+**2. Log unbuffered.** Add `Environment=PYTHONUNBUFFERED=1` to the service unit. Python
+block-buffers `print()` to a pipe, so log lines can sit in the process for hours and be
+lost entirely when it is killed — which, on this project, destroyed the record of thousands
+of adapter recoveries and led directly to a wrong diagnosis.
+
+**3. Capture HCI traffic continuously.** `tools/btmon-ring.sh` keeps a rolling week of
+HCI captures, so the next failure has a trace instead of prompting one to be started
+afterwards. See [tools/README.md](tools/README.md) for what to look for in it.
+
+Then run the health report, weekly during any soak test:
+
+```bash
+python3 tools/bt_health.py --days 7
+```
+
+It reports `bluetoothd` crashes (should be zero), adapter recoveries (rare), whole-bank
+scan outages (the adapter wedging), kernel controller-desync lines, and per-battery failure
+rates — one battery far worse than the rest is that battery or where it sits; all of them
+together is the adapter.
+
+**About combo WiFi+Bluetooth adapters.** If your Bluetooth comes from a USB stick that also
+provides WiFi, that single shared antenna is a common source of exactly these problems, and
+it is worse if the WiFi half is also carrying the machine's network traffic. A dedicated
+Bluetooth-only adapter (CSR8510A10 or BCM20702A0), on a USB **2.0** port and on a short
+extension cable away from other radios, is the single most effective fix available. Assign
+batteries to it per battery with `"adapter": "hci1"`.
 
 ---
 
@@ -559,15 +626,20 @@ These four constants are defined at the top of `dashboard.py`. They are **not** 
 - Every battery is read through `bms_driver.read_battery()`, which picks the matching **`aiobmsble`** driver from the battery's `protocol`. Adding a supported BMS model is a config change, not a code change.
 - Batteries marked `"persistent": true` keep **one BLE connection open** across polls; the rest connect and disconnect per poll. Every disconnect unsubscribes from notifications first, runs from a `finally`, and is logged if it fails — BlueZ does not close connections when a process dies, and a peripheral that is never told the link ended can keep believing it is still connected (and a connected peripheral stops advertising).
 - On startup, and before any adapter power-cycle, the dashboard sweeps away links BlueZ is still holding from a previous run.
-- A background thread polls each battery sequentially (BLE only allows one connection at a time per adapter). Each battery is retried up to `polling.attempts` (2) times per cycle before counting as a miss. On a miss the last-known-good values are **retained** — the card stays visible but is dimmed/marked stale rather than disappearing.
-- A background watchdog tracks consecutive misses per battery. A wedged adapter loses *every* battery at once, so recovery only fires when a **quorum** of batteries has missed `RECOVER_AFTER_MISSES` (3) consecutive cycles — one flaky pack can no longer power-cycle the adapter for the whole bank. It graduates from a gentle power-cycle to a USB reset, is rate-limited by `RECOVER_COOLDOWN_SECONDS` (300 s), and falls back to `systemctl restart bluetooth`. See the Troubleshooting section for reading the recovery logs.
+- A background thread polls batteries sequentially (BLE allows one connection at a time per adapter). **One scan per adapter per cycle** collects advertisements for every battery due a read, and a battery is only connected to if it was actually heard — a device object cached by BlueZ is not evidence that a battery is reachable, and connecting to one is how you end up talking to a ghost.
+- Each battery can carry its own `interval_seconds` and `attempts`. After consecutive failures a battery backs off exponentially (to `polling.backoff_max_minutes`), so a pack that is out of range stops generating a continuous retry storm — every host-stack crash observed on this system was preceded by minutes of exactly that.
+- On a miss the last-known-good values are **retained** — the card stays visible but is dimmed and marked stale rather than disappearing.
+- The adapter is power-cycled only when the **adapter** looks wedged: every battery on it that was seen in the last `polling.recover_stale_minutes` is missing, and there are at least two of them. A battery missing on its own is that battery's problem, and a battery that has been gone for an hour ages out entirely — otherwise one dead pack keeps the adapter cycling forever. Links are brought down and verified down first, the result is checked by scanning, and only then does it escalate to a USB re-enumeration.
+- If `bluetoothd` restarts underneath the dashboard, the poll loop rebuilds its event loop. The Bluetooth library caches D-Bus object paths and the GATT service database per event loop and never notices the daemon leaving the bus, so without this every battery fails identically until the service is restarted by hand.
+- Readings and events are appended to `state/telemetry.jsonl`, so a battery's last known state survives the failure that made you want it.
 - A tiny Flask server serves that data as JSON to the browser at `/api/data`.
 - The browser uses vanilla JavaScript + a vendored Tailwind runtime — everything is served locally. **No internet connection is required at any point after install.**
 
-> **Design notes:** two ADRs cover this area — the in-process BLE-adapter recovery
-> ([0001](docs/adr/0001-ble-battery-disappearance-recovery.md)) and the persistent
-> ECO-WORTHY connection, release switch, and quorum-gated recovery that supersede parts
-> of it ([0002](docs/adr/0002-ecoworthy-persistent-connection.md)).
+> **Design notes:** three ADRs cover this area — in-process BLE-adapter recovery
+> ([0001](docs/adr/0001-ble-battery-disappearance-recovery.md)); the shared driver,
+> release switch and quorum-gated recovery ([0002](docs/adr/0002-ecoworthy-persistent-connection.md));
+> and why the ECO-WORTHY's link exposure is minimised on a shared adapter, with the
+> evidence that would reverse that ([0003](docs/adr/0003-ecoworthy-link-exposure.md)).
 
 ---
 
@@ -617,6 +689,31 @@ of the two protocols in this project supply each field:
 | `problem_code` | int\|null | Raw fault code. Model-specific: this project does not decode it, and neither does `aiobmsble` |
 
 A battery that has never been read yet does not appear in the response at all.
+
+## `GET /api/health`
+
+Adapter-level health, kept separate from `/api/data` because that endpoint is keyed by
+battery id and consumers iterate its keys.
+
+```json
+{
+  "adapters": [{"adapter": "default", "healthy": true, "last_fault_seconds_ago": null,
+                "last_outage": null, "last_recovery": null, "last_stack_restart": null,
+                "recovery_count": 0}],
+  "library": "0.28.0",
+  "held_links": []
+}
+```
+
+`healthy` is false when any adapter-level fault happened within `polling.health_gate_minutes`.
+The dashboard shows an amber banner while that is the case, and hides it otherwise. The three
+fault kinds are worth distinguishing:
+
+| Fault | Meaning |
+|---|---|
+| `last_outage` | Every battery on that adapter went missing in one scan. The adapter has stopped hearing advertisements — this is the event that killed the ECO-WORTHY. |
+| `last_recovery` | We power-cycled the adapter. Any link open at that moment may have been severed without the battery being told. |
+| `last_stack_restart` | `bluetoothd` went away and came back. The dashboard rebuilds its event loop when this happens, because the Bluetooth library's caches are stale afterwards and never recover on their own. |
 
 ## `GET /api/config`
 
@@ -698,8 +795,10 @@ curl -X POST http://localhost:8040/api/ble/resume \
 
 **The ECO-WORTHY has vanished from Bluetooth entirely and won't come back**
 - If it does not appear in `bluetoothctl scan on` at all, its BLE module is wedged: it believes a connection is still open, so it has stopped advertising. Only a power cycle of the BMS clears this — discharge to cutoff and recharge.
-- Set `"persistent": true` for that battery (see the config section). Holding one link, the way the phone app does, avoids the repeated teardowns that trigger this.
+- **Do not set `"persistent": true` to fix this on a shared adapter** — that was tried, and it made things worse. A held link is open during every adapter wedge. Use a long `interval_seconds`, `attempts: 1` and `health_gated: true` instead, or move the battery to its own adapter. [ADR 0003](docs/adr/0003-ecoworthy-link-exposure.md) has the evidence.
+- Check `python3 tools/bt_health.py --days 7` before blaming the battery. If it shows `bluetoothd` crashes or whole-bank scan outages, the host stack is the problem and no battery-side setting will fix it.
 - Always stop the service with `systemctl stop bms-dashboard` rather than `kill -9`, so the links are closed properly on the way out.
+- Once it is silent there is no remote way to wake it. Bluetooth Low Energy has no paging: a central can only connect in response to an advertisement, so if it isn't advertising, nothing on the host can reach it. Recovery is the vendor's procedure — discharge to low-voltage cutoff, rest, recharge.
 
 **Dashboard works from the server but not from my phone**
 - Check `server.host` is `0.0.0.0` (not `127.0.0.1`).

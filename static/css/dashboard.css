@@ -348,3 +348,35 @@ html.dark .dir-problem {
 html.dark .problem-note {
     color: rgb(248 113 113);
 }
+
+/* Adapter-level fault banner. Amber, not red: the adapter having a bad night is a
+   warning about data quality, not a battery fault. Hidden entirely when healthy. */
+.adapter-warning {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.55rem 0.9rem;
+    border-radius: 0.75rem;
+    font-size: 0.8rem;
+    background: rgba(245, 158, 11, 0.1);
+    border: 1px solid rgba(245, 158, 11, 0.35);
+    color: rgb(146 64 14);
+}
+html.dark .adapter-warning {
+    background: rgba(245, 158, 11, 0.12);
+    border-color: rgba(245, 158, 11, 0.3);
+    color: rgb(252 211 77);
+}
+.adapter-warning + .adapter-warning {
+    margin-top: 0.4rem;
+}
+.adapter-warning-title {
+    font-weight: 700;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.adapter-warning-count {
+    margin-left: auto;
+    font-variant-numeric: tabular-nums;
+    opacity: 0.85;
+}

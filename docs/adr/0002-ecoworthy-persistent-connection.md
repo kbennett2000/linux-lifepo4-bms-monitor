@@ -1,7 +1,7 @@
 # 0002. Hold one BLE connection for the ECO-WORTHY, and stop stranding it
 
 Date: 2026-08-18
-Status: Accepted
+Status: Accepted — **the persistent-connection decision is superseded by [0003](0003-ecoworthy-link-exposure.md)**; the rest stands
 Supersedes part of [0001](0001-ble-battery-disappearance-recovery.md)
 
 ## Context
@@ -104,3 +104,34 @@ now requires a majority of batteries at the miss threshold, not just one.
 - Holding one link degrades the JBD packs' reads through scan/connect contention on a single
   adapter. A second USB dongle dedicated to the ECO-WORTHY would decouple them entirely, and
   would also mean recovery power-cycling `hci0` could never touch that link.
+
+
+---
+
+## Postscript (2026-09-12)
+
+The battery died again ~48 h after this shipped, and the follow-up investigation revised
+two things here.
+
+**The persistent connection was the wrong call on this adapter.** The premise — that the
+teardown count was the danger — was not supported. The link survived four `bluetoothd`
+crashes and died at the first whole-adapter scan outage, while it happened to be open.
+What matters on this hardware is how much of the time a link is *open* when the adapter
+wedges, not how often it is closed. Reversed in [0003](0003-ecoworthy-link-exposure.md);
+it should be reinstated if the battery ever moves to a dedicated adapter, where upstream's
+"hold the link" default is the right one.
+
+**The explicit `stop_notify` before `Disconnect` was probably harmful.** BlueZ 5.85 has a
+use-after-free in GATT client teardown (LP #2164630), and `bluetoothd` began segfaulting
+8 hours after this change went live, having never crashed in the preceding 84 days of
+journal. Removed in 0003.
+
+**The quorum change here was right and did not go far enough.** It cut recovery firings
+from 2,678 to 129, but a dead battery counted toward the quorum forever, so a dead
+ECO-WORTHY plus one flaky JBD still power-cycled the adapter 21 times on 2026-08-21.
+0003 ages out batteries that have not been seen for an hour.
+
+One caution for anyone reading the numbers in this ADR or the ones it was written from:
+the recovery counts and timestamps in the old journal are unreliable, because `print()`
+was block-buffered and the lines only reached the journal in bursts when the buffer filled
+or the process exited. All logging is flushed as of 0003.

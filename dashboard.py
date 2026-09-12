@@ -12,21 +12,44 @@ All static UI strings, the listen port, and the battery list live in
 The dashboard ships every asset locally; once the Python deps are installed
 it runs with zero internet connection.
 
+Poll loop, in one paragraph
+---------------------------
+Each adapter is polled in turn. One scan per adapter per cycle collects
+advertisements for every battery due a read, and only batteries actually heard
+advertising are connected to. Each battery has its own interval and its own
+failure backoff, so a fragile pack can be read rarely without slowing the bank and
+a chronically failing pack stops generating retry storms. An adapter is only
+power-cycled when the whole adapter looks wedged, never because one battery is
+missing. Batteries marked ``health_gated`` sit out for a while after any
+adapter-level fault. See ``docs/adr/0003-ecoworthy-link-exposure.md``.
+
 Author: Kris Bennett (May 2026)
 """
 
 import argparse
 import asyncio
+import contextlib
+import json
 import os
 import signal
 import subprocess
 import threading
 import time
+from collections import deque
+from pathlib import Path
 
 from flask import Flask, jsonify, render_template, request
 
 import bms_driver
-from bms_config import battery_entries, load_config, polling_config
+from bms_config import (
+    adapters,
+    batteries_on,
+    battery_attempts,
+    battery_entries,
+    battery_interval,
+    load_config,
+    polling_config,
+)
 
 # Optional in-process BLE-adapter recovery. If the dependency isn't installed we
 # fall back to `systemctl restart bluetooth`, so the dashboard still runs without
@@ -48,44 +71,31 @@ except ImportError:  # pragma: no cover
 CONFIG = load_config()
 ENTRIES = battery_entries(CONFIG)
 POLLING = polling_config(CONFIG)
+ADAPTERS = adapters(ENTRIES)
 ADDRESSES = [e["address"] for e in ENTRIES.values()]
+ROOT = Path(__file__).resolve().parent
 
 # Fail loudly at startup on an unknown protocol. Previously any unrecognised value
 # silently fell through to the ECO-WORTHY branch, so a typo produced a battery that
 # simply never reported — indistinguishable from one that was out of range.
 bms_driver.validate_protocols(ENTRIES)
 
-# A battery that fails to produce a fresh reading for this many consecutive poll
-# cycles is shown as "stale" (last-known values, dimmed in the UI) instead of
-# disappearing from the dashboard. Counting cycles rather than wall-clock seconds
-# keeps the flag accurate even though a full poll cycle can take anywhere from
-# ~40s to a couple of minutes depending on BLE scan timing.
+# A battery that fails to produce a fresh reading for this many consecutive reads is
+# shown as "stale" (last-known values, dimmed in the UI) instead of disappearing.
 STALE_AFTER_MISSES = 1
-
-# Attempts per battery within a single cycle before it counts as a miss. One retry
-# absorbs the common case of a single dropped BLE scan / missed advertisement.
-# Configurable via the "polling" block in config.json.
-FETCH_ATTEMPTS = POLLING["attempts"]
-
-# When a battery has missed this many *consecutive* cycles, the BLE adapter itself
-# has likely wedged (BlueZ/HCI stops returning advertisements after hours of
-# scanning). At that point no amount of Python retrying helps — the adapter must be
-# power-cycled. Set high enough to rule out an ordinary transient miss.
-RECOVER_AFTER_MISSES = 3
-
-# ...but a *single* battery missing means that battery is missing, not that the
-# adapter has wedged — a wedged adapter loses every battery at once. Requiring a
-# quorum stops one flaky pack from power-cycling the adapter for the whole bank,
-# which used to rip the link out from under the healthy packs (and, for a peripheral
-# that is mid-connection, is exactly how it ends up holding a phantom link).
-RECOVER_MIN_BATTERIES = max(2, (len(ENTRIES) + 1) // 2)
 
 # Give BlueZ a moment to finish the disconnects we asked for before power-cycling.
 RECOVER_SETTLE_SECONDS = 2.0
 
-# Don't attempt adapter recovery more than once per this many seconds, so a battery
-# that is genuinely offline (e.g. removed) can't trigger a power-cycle every cycle.
-RECOVER_COOLDOWN_SECONDS = 300
+# After a recovery, something should be advertising again within this long. If nothing
+# is, the gentle power-cycle did not take and we escalate to a USB re-enumeration —
+# an escalation that, before this was checked, had never actually run in production.
+RECOVER_VERIFY_SECONDS = 120.0
+
+# Bounds on how long the poll thread sleeps between cycles. Batteries carry their own
+# intervals, so the loop wakes when the earliest one is due rather than on a fixed tick.
+MIN_SLEEP_SECONDS = 1.0
+MAX_SLEEP_SECONDS = 60.0
 
 app = Flask(__name__, static_folder="static", template_folder="templates")
 
@@ -105,6 +115,117 @@ release_until = {}          # {battery_name: epoch_seconds}
 shutdown_event = threading.Event()
 shutdown_done = threading.Event()
 
+# Adapter-level health, published on /api/health and consulted by the health gate.
+health_lock = threading.Lock()
+adapter_health = {}
+
+
+def log(message: str) -> None:
+    """Print a poll-thread line. Always flushed.
+
+    Unflushed ``print()`` cost this project its entire record of adapter recoveries:
+    the buffered lines were still in the process when SIGTERM arrived and were lost,
+    so months of power-cycles left no trace and the wrong conclusion was drawn from
+    their apparent absence.
+    """
+    print(message, flush=True)
+
+
+def _adapter_label(adapter) -> str:
+    return adapter or "default adapter"
+
+
+# --------------------------------------------------------------------------------
+# Adapter health
+# --------------------------------------------------------------------------------
+
+class AdapterHealth:
+    """Tracks adapter-level faults, as distinct from one battery misbehaving.
+
+    The distinction matters because the two demand opposite responses. A battery that
+    stops answering is that battery's problem and no amount of adapter surgery helps.
+    An adapter that has stopped returning advertisements for *everything* takes every
+    battery down with it, and takes their open links with it when it is reset.
+    """
+
+    KINDS = ("outage", "recovery", "stack_restart")
+
+    def __init__(self, adapter):
+        self.adapter = adapter
+        self.faults = {kind: 0.0 for kind in self.KINDS}
+        self.last_recovery_attempt = 0.0
+        self.recovery_count = 0
+
+    def note(self, kind: str, *, detail: str = "") -> None:
+        self.faults[kind] = time.time()
+        log(f"[health] {_adapter_label(self.adapter)}: {kind}"
+            + (f" — {detail}" if detail else ""))
+
+    def seconds_since_fault(self):
+        """Seconds since the most recent fault of any kind, or None if never."""
+        newest = max(self.faults.values())
+        return None if newest == 0.0 else time.time() - newest
+
+    def is_quiet(self, minutes: float) -> bool:
+        """True if no adapter-level fault has been recorded in the last ``minutes``."""
+        since = self.seconds_since_fault()
+        return since is None or since >= minutes * 60
+
+    def snapshot(self) -> dict:
+        since = self.seconds_since_fault()
+        return {
+            "adapter": self.adapter or "default",
+            "last_fault_seconds_ago": None if since is None else int(since),
+            "last_outage": self.faults["outage"] or None,
+            "last_recovery": self.faults["recovery"] or None,
+            "last_stack_restart": self.faults["stack_restart"] or None,
+            "recovery_count": self.recovery_count,
+            "healthy": self.is_quiet(POLLING["health_gate_minutes"]),
+        }
+
+
+# --------------------------------------------------------------------------------
+# Telemetry
+# --------------------------------------------------------------------------------
+
+class Telemetry:
+    """Append-only JSONL of readings and events, so a failure leaves evidence.
+
+    Without this, everything the dashboard knows lives in ``latest_data`` and dies with
+    the process — which is why the last reported state of a battery before it went
+    silent (its fault code, its current, whether it was charging) has never once been
+    available afterwards.
+    """
+
+    def __init__(self, path: Path, max_bytes: int = 4_000_000):
+        self.path = path
+        self.max_bytes = max_bytes
+        self.lock = threading.Lock()
+        self.enabled = POLLING["telemetry_samples"] > 0
+        self.recent = deque(maxlen=max(1, POLLING["telemetry_samples"]))
+
+    def write(self, kind: str, name: str, payload: dict) -> None:
+        if not self.enabled:
+            return
+        record = {"ts": round(time.time(), 3), "kind": kind, "battery": name, **payload}
+        self.recent.append(record)
+        try:
+            with self.lock:
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                if self.path.exists() and self.path.stat().st_size > self.max_bytes:
+                    self.path.replace(self.path.with_suffix(".jsonl.1"))
+                with open(self.path, "a", encoding="utf-8") as fh:
+                    fh.write(json.dumps(record, separators=(",", ":")) + "\n")
+        except Exception as exc:  # noqa: BLE001 - telemetry must never break polling
+            log(f"[telemetry] write failed: {type(exc).__name__}: {exc}")
+
+
+telemetry = Telemetry(ROOT / "state" / "telemetry.jsonl")
+
+
+# --------------------------------------------------------------------------------
+# Release switch
+# --------------------------------------------------------------------------------
 
 def _released_until(name):
     """Epoch until which `name` is released, or None if it is not released."""
@@ -119,101 +240,146 @@ def _released_until(name):
         return deadline
 
 
-def _fetch_with_retry(loop, name, entry, attempts=FETCH_ATTEMPTS):
+# --------------------------------------------------------------------------------
+# Reading
+# --------------------------------------------------------------------------------
+
+def _fetch_with_retry(loop, name, entry, device, attempts):
     """Read a single battery, retrying a few times before giving up this cycle.
 
     Each attempt needs a fresh coroutine (a coroutine cannot be awaited twice).
-    Returns the reading dict on success, or None if every attempt failed.
+    Returns ``(reading_or_None, stack_error_reason_or_None)``.
 
-    Failures are logged rather than swallowed. Distinguishing "not found in scan"
-    from "connected but no data" is what tells you whether a battery is out of
-    range, wedged, or talking a protocol we're misreading — and the same signal
-    drives the adapter-recovery decision below.
+    Failures are logged rather than swallowed. Distinguishing "not advertising" from
+    "connected but no data" from "the host stack just restarted" is what tells you
+    whether a battery is out of range, wedged, or whether the problem is not the
+    battery at all — and the last of those needs the event loop rebuilt, not a retry.
     """
-    for _ in range(attempts):
-        result = loop.run_until_complete(
-            bms_driver.read_battery(
-                name,
-                entry["address"],
-                entry["protocol"],
-                persistent=entry["persistent"],
-                scan_timeout=POLLING["scan_timeout"],
-                log=lambda msg: print(msg, flush=True),
+    started = time.time()
+    for attempt in range(attempts):
+        try:
+            result = loop.run_until_complete(
+                bms_driver.read_battery(
+                    name,
+                    entry["address"],
+                    entry["protocol"],
+                    device=device,
+                    persistent=entry["persistent"],
+                    adapter=entry["adapter"],
+                    scan_timeout=POLLING["scan_timeout"],
+                    log=log,
+                )
             )
-        )
+        except Exception as exc:  # noqa: BLE001 - read_battery should not raise, but be safe
+            reason = bms_driver.classify_stack_error(exc)
+            log(f"[{name}] read raised: {type(exc).__name__}: {exc}")
+            return None, reason
+
         if result:
-            return result
-    return None
+            elapsed = time.time() - started
+            log(f"[{name}] read ok in {elapsed:.1f}s (attempt {attempt + 1}/{attempts})")
+            return result, None
+    return None, None
 
 
-def _resolve_adapter():
-    """Best-effort discovery of the BLE adapter's (hci_index, mac) for recovery.
+# --------------------------------------------------------------------------------
+# Adapter recovery
+# --------------------------------------------------------------------------------
+
+def _resolve_adapter(adapter):
+    """Best-effort discovery of an adapter's (hci_index, mac) for recovery.
 
     Returns (0, None) if the helper library is unavailable or discovery fails;
     recover_adapter tolerates an unknown MAC, and hci0 is the near-universal default.
     """
+    wanted = None
+    if adapter and adapter.startswith("hci") and adapter[3:].isdigit():
+        wanted = int(adapter[3:])
+
     if get_adapters_from_hci is None:
-        return 0, None
+        return (wanted or 0), None
     try:
-        adapters = get_adapters_from_hci()  # {hci_index: {"bdaddr": "AA:..", ...}}
+        found = get_adapters_from_hci()  # {hci_index: {"bdaddr": "AA:..", ...}}
     except Exception as exc:  # noqa: BLE001 - discovery is advisory only
-        print(f"[recovery] could not enumerate adapters: {type(exc).__name__}: {exc}")
-        return 0, None
-    if not adapters:
-        return 0, None
-    # NOTE: assumes a single BLE adapter. We pick hci0 (or the lowest index), which
-    # matches Bleak's default adapter. On a host with more than one adapter, recovery
-    # could target the wrong one — warn so that case is visible in the logs.
-    if len(adapters) > 1:
-        print(f"[recovery] multiple BLE adapters found ({sorted(adapters)}); "
-              f"recovery assumes the lowest index — verify it's the one in use")
-    hci = 0 if 0 in adapters else sorted(adapters)[0]
-    return hci, adapters[hci].get("bdaddr")
+        log(f"[recovery] could not enumerate adapters: {type(exc).__name__}: {exc}")
+        return (wanted or 0), None
+    if not found:
+        return (wanted or 0), None
+
+    if wanted is not None and wanted in found:
+        hci = wanted
+    else:
+        if wanted is not None:
+            log(f"[recovery] configured adapter {adapter} not found among {sorted(found)}")
+        hci = 0 if 0 in found else sorted(found)[0]
+    return hci, found[hci].get("bdaddr")
 
 
-def _recover_adapter(loop):
-    """Power-cycle the BLE adapter to clear a wedged BlueZ/HCI state.
+def _quiesce_links(loop, addresses):
+    """Bring our links down *before* the adapter is power-cycled, and say if we can't.
 
-    Tries the bluetooth-auto-recovery library first, escalating from a gentle power
-    cycle to a USB reset only if the gentle attempt fails. Falls back to the
-    `systemctl restart bluetooth` command that is already known to fix this by hand.
-    Returns True if a recovery path reported success. Never raises.
-
-    Every path here yanks the adapter out from under any open link *without* the
-    peripheral being told, and a peripheral that never learns the link is gone can
-    keep believing it is connected — and a connected peripheral stops advertising.
-    So we always quiesce first.
+    This matters more than it looks. ``recover_adapter`` issues no per-link disconnect
+    at all, and the kernel's power-off path deliberately does not wait for the ones it
+    does issue to complete — so any link still up when the adapter goes down may be
+    severed without the peripheral ever being told. For a BMS module that only resumes
+    advertising after a clean disconnect, that is the difference between a blip and a
+    battery that needs a full discharge to revive.
     """
-    # Close everything we know we hold, then ask BlueZ to drop anything it is still
-    # holding on our behalf (e.g. an ACL leaked by a previous process generation).
-    if bms_driver.has_open_links():
-        print(f"[recovery] closing held links before power-cycle: "
-              f"{', '.join(bms_driver.held_session_names())}")
     try:
-        loop.run_until_complete(bms_driver.close_all_sessions())
-        loop.run_until_complete(bms_driver.close_stale_links(ADDRESSES))
+        loop.run_until_complete(bms_driver.close_all_sessions(log=log))
+        loop.run_until_complete(bms_driver.close_stale_links(addresses, log=log))
+        still_up = loop.run_until_complete(
+            bms_driver.connected_addresses(addresses, log=log)
+        )
     except Exception as exc:  # noqa: BLE001 - quiescing is best-effort
-        print(f"[recovery] link teardown failed: {type(exc).__name__}: {exc}")
+        log(f"[recovery] link teardown failed: {type(exc).__name__}: {exc}")
+        return
+
+    if still_up:
+        log(f"[recovery] WARNING: still connected before power-cycle: {', '.join(still_up)}"
+            f" — these peripherals may be stranded by the reset")
+        telemetry.write("recovery_stranding_risk", "-", {"addresses": still_up})
+
+
+def _recover_adapter(loop, adapter, addresses):
+    """Power-cycle one BLE adapter to clear a wedged BlueZ/HCI state.
+
+    Tries the bluetooth-auto-recovery library first, verifies the result by scanning,
+    and escalates to a USB re-enumeration only if nothing is heard afterwards. Falls
+    back to `systemctl restart bluetooth`. Returns True if a path reported success.
+    Never raises.
+    """
+    if bms_driver.has_open_links():
+        log(f"[recovery] closing held links before power-cycle: "
+            f"{', '.join(bms_driver.held_session_names())}")
+    _quiesce_links(loop, addresses)
     time.sleep(RECOVER_SETTLE_SECONDS)
 
-    hci, mac = _resolve_adapter()
+    hci, mac = _resolve_adapter(adapter)
 
     if recover_adapter is not None:
-        # Graduated recovery: a plain power-cycle (gone_silent=False) clears most
-        # wedges. Only if that fails do we escalate to gone_silent=True, which adds a
-        # disruptive USB unbind/rebind that can re-enumerate the adapter.
+        # Graduated recovery: a plain power-cycle clears most wedges. Escalate to
+        # gone_silent=True (a USB unbind/rebind) only when the gentle attempt fails
+        # *or* when it claims success but nothing is advertising afterwards. The old
+        # code returned on the library's say-so, so the escalation never once ran.
         for gone_silent in (False, True):
             try:
                 ok = loop.run_until_complete(
                     recover_adapter(hci, mac, gone_silent=gone_silent)
                 )
-                print(f"[recovery] recover_adapter(hci{hci}, {mac}, "
-                      f"gone_silent={gone_silent}) -> {ok}")
-                if ok:
-                    return True
+                log(f"[recovery] recover_adapter(hci{hci}, {mac}, "
+                    f"gone_silent={gone_silent}) -> {ok}")
             except Exception as exc:  # noqa: BLE001 - fall through / escalate
-                print(f"[recovery] recover_adapter(gone_silent={gone_silent}) failed: "
-                      f"{type(exc).__name__}: {exc}")
+                log(f"[recovery] recover_adapter(gone_silent={gone_silent}) failed: "
+                    f"{type(exc).__name__}: {exc}")
+                continue
+
+            if not ok:
+                continue
+            if _adapter_hears_anything(loop, adapter):
+                return True
+            log(f"[recovery] adapter reported recovered but heard nothing in "
+                f"{RECOVER_VERIFY_SECONDS:.0f}s — escalating")
 
     # Fallback: the exact command proven to work by hand on this server.
     try:
@@ -223,12 +389,68 @@ def _recover_adapter(loop):
             capture_output=True,
             timeout=30,
         )
-        print("[recovery] 'systemctl restart bluetooth' succeeded")
+        log("[recovery] 'systemctl restart bluetooth' succeeded")
         return True
     except Exception as exc:  # noqa: BLE001 - log and let the next cycle retry
-        print(f"[recovery] 'systemctl restart bluetooth' failed: "
-              f"{type(exc).__name__}: {exc}")
+        log(f"[recovery] 'systemctl restart bluetooth' failed: "
+            f"{type(exc).__name__}: {exc}")
         return False
+
+
+def _adapter_hears_anything(loop, adapter) -> bool:
+    """True if *any* BLE device is heard on this adapter shortly after a recovery.
+
+    Deliberately not limited to our batteries: the question is whether the radio is
+    receiving at all. A neighbour's phone counts.
+    """
+    deadline = time.time() + RECOVER_VERIFY_SECONDS
+    while time.time() < deadline and not shutdown_event.is_set():
+        try:
+            heard = loop.run_until_complete(
+                bms_driver.scan_all(adapter=adapter, timeout=10.0, log=log)
+            )
+        except Exception as exc:  # noqa: BLE001 - verification is advisory
+            log(f"[recovery] verification scan failed: {type(exc).__name__}: {exc}")
+            return False
+        if heard:
+            log(f"[recovery] {_adapter_label(adapter)} is hearing advertisements again "
+                f"({len(heard)} device(s))")
+            return True
+    return False
+
+
+# --------------------------------------------------------------------------------
+# Poll loop
+# --------------------------------------------------------------------------------
+
+class _PollState:
+    """Per-battery scheduling and failure bookkeeping."""
+
+    def __init__(self, names):
+        now = time.time()
+        self.due = {name: now for name in names}
+        self.failures = {name: 0 for name in names}
+        self.misses = {name: 0 for name in names}
+        self.last_seen = {name: 0.0 for name in names}
+        self.last_unfiltered_scan = {name: 0.0 for name in names}
+
+    def schedule_next(self, name, interval, *, failed, backoff_cap_minutes):
+        """Set the next due time, backing off after consecutive failures.
+
+        Backoff exists to stop a chronically unreachable battery from generating a
+        continuous retry storm. Every observed host-stack crash on this system was
+        preceded by minutes of exactly that, so quietening a failing battery is not
+        just tidiness — it removes the conditions the crash needs.
+        """
+        if failed:
+            self.failures[name] += 1
+            factor = min(2 ** min(self.failures[name], 16), backoff_cap_minutes * 60 / max(interval, 1))
+            factor = max(1.0, factor)
+        else:
+            self.failures[name] = 0
+            factor = 1.0
+        self.due[name] = time.time() + interval * factor
+        return factor
 
 
 def background_updater():
@@ -236,105 +458,283 @@ def background_updater():
     asyncio.set_event_loop(loop)
 
     labels = {name: entry["label"] for name, entry in ENTRIES.items()}
-    last_recovery = 0.0  # epoch of the last adapter-recovery attempt (cooldown)
-    # Consecutive-miss counter for *every* configured battery, used to detect a
-    # wedged adapter. Kept independent of latest_data so a battery that has never
-    # been read once (adapter already wedged at startup) still counts toward
-    # recovery, not just ones with a last-known-good reading.
-    miss_counts = {name: 0 for name in ENTRIES}
+    state = _PollState(ENTRIES)
+
+    with health_lock:
+        for adapter in ADAPTERS:
+            adapter_health[adapter] = AdapterHealth(adapter)
+
+    log(f"[startup] aiobmsble {bms_driver.library_version()}, "
+        f"{len(ENTRIES)} batteries on {len(ADAPTERS)} adapter(s), "
+        f"interval {POLLING['interval_seconds']}s")
 
     # BlueZ keeps an ACL open when the owning process dies, so after a crash, a
     # `kill -9` or a `systemctl restart` the previous run's links may still be
     # attached — which both blocks our reconnect and leaves the peripheral believing
     # it is still connected. Sweep them before the first poll.
     try:
-        loop.run_until_complete(bms_driver.close_stale_links(ADDRESSES))
+        loop.run_until_complete(bms_driver.close_stale_links(ADDRESSES, log=log))
     except Exception as exc:  # noqa: BLE001 - advisory
-        print(f"[startup] stale-link sweep failed: {type(exc).__name__}: {exc}")
+        log(f"[startup] stale-link sweep failed: {type(exc).__name__}: {exc}")
+
+    def rebuild_loop(reason):
+        """Replace the event loop after the host stack restarted underneath it.
+
+        bleak keys its BlueZ manager — and that manager's D-Bus connection, device
+        object cache and GATT service cache — by the running event loop, and registers
+        no watcher for bluetoothd leaving the bus. So after a restart every cached path
+        is stale forever and each call fails identically. A fresh loop is what actually
+        clears it; nothing short of that does.
+        """
+        nonlocal loop
+        log(f"[stack] {reason} — rebuilding event loop")
+        try:
+            loop.run_until_complete(bms_driver.close_all_sessions(log=log))
+        except Exception as exc:  # noqa: BLE001 - the old loop is already suspect
+            log(f"[stack] session teardown failed: {type(exc).__name__}: {exc}")
+        with contextlib.suppress(Exception):
+            loop.close()
+        # The registry is module-level and outlives the loop; a driver built on the
+        # closed loop would raise cross-loop errors from its internal primitives.
+        bms_driver.forget_sessions()
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        for adapter in ADAPTERS:
+            with health_lock:
+                adapter_health[adapter].note("stack_restart", detail=reason)
 
     try:
         while not shutdown_event.is_set():
             try:
-                results = {}
-                for name, entry in ENTRIES.items():
-                    if shutdown_event.is_set():
-                        break
-                    # Released to the phone app: hand the link back and skip it.
-                    if _released_until(name) is not None:
-                        loop.run_until_complete(bms_driver.drop_session(name))
-                        continue
-                    results[name] = _fetch_with_retry(loop, name, entry)
-
-                now = time.time()
-                with update_lock:
-                    for name, result in results.items():
-                        if result:
-                            # Fresh reading: store it and reset the miss counter.
-                            result["label"] = labels.get(name, name)
-                            # Rated capacity is config, not battery data, so it is merged
-                            # here alongside the label rather than inside the driver.
-                            result["rated_ah"] = bms_driver.rated_capacity(
-                                ENTRIES[name], result
-                            )
-                            result["last_seen"] = now
-                            result["misses"] = 0
-                            latest_data[name] = result
-                            miss_counts[name] = 0
-                        else:
-                            miss_counts[name] += 1
-                            if name in latest_data:
-                                # Keep the last-known-good values and mirror the miss
-                                # count so api_data() can flag the card stale.
-                                latest_data[name]["misses"] = miss_counts[name]
-
-                # A wedged adapter loses *every* battery at once. One battery missing
-                # just means that battery is missing, and power-cycling the adapter for
-                # it tears down the healthy packs' links too. Require a quorum.
-                at_threshold = sum(
-                    1 for c in miss_counts.values() if c >= RECOVER_AFTER_MISSES
-                )
-                if (
-                    at_threshold >= min(RECOVER_MIN_BATTERIES, len(ENTRIES))
-                    and now - last_recovery >= RECOVER_COOLDOWN_SECONDS
-                ):
-                    print(
-                        f"[recovery] {at_threshold}/{len(ENTRIES)} batteries missing "
-                        f"{RECOVER_AFTER_MISSES}+ cycles — recovering BLE adapter"
-                    )
-                    # Stamp the cooldown from the actual attempt time, not the pre-scan
-                    # `now` (a full scan can take minutes), so the cooldown reflects real
-                    # elapsed time between recovery attempts.
-                    last_recovery = time.time()
-                    if _recover_adapter(loop):
-                        # Recovery restarts bluetoothd / re-enumerates the adapter out
-                        # from under this loop, invalidating the D-Bus connection bleak
-                        # holds inside it. Sessions were already closed by
-                        # _recover_adapter, so it is safe to start a fresh loop.
-                        loop.close()
-                        loop = asyncio.new_event_loop()
-                        asyncio.set_event_loop(loop)
-                        # Reset miss counters so we wait a full RECOVER_AFTER_MISSES
-                        # window before deciding the recovery didn't take.
-                        miss_counts = {name: 0 for name in ENTRIES}
-                        with update_lock:
-                            for entry in latest_data.values():
-                                entry["misses"] = 0
+                _poll_once(loop, state, labels, rebuild_loop)
             except (KeyboardInterrupt, SystemExit):
                 raise
             except BaseException as exc:  # noqa: BLE001 - never let the poll thread die
                 # A single bad cycle (including CancelledError, which is a BaseException
                 # and would otherwise escape) must not kill the updater thread, or the
                 # whole dashboard would freeze until a manual restart.
-                print(f"[background_updater] cycle error: {type(exc).__name__}: {exc}")
+                log(f"[background_updater] cycle error: {type(exc).__name__}: {exc}")
 
-            shutdown_event.wait(POLLING["interval_seconds"])
+            shutdown_event.wait(_sleep_seconds(state))
     finally:
         # Last line of defence: never leave a peripheral holding a phantom link.
         try:
-            loop.run_until_complete(bms_driver.close_all_sessions())
+            loop.run_until_complete(bms_driver.close_all_sessions(log=log))
         except Exception as exc:  # noqa: BLE001
-            print(f"[shutdown] session teardown failed: {type(exc).__name__}: {exc}")
+            log(f"[shutdown] session teardown failed: {type(exc).__name__}: {exc}")
         shutdown_done.set()
+
+
+def _sleep_seconds(state) -> float:
+    """Sleep until the earliest battery is due, within sane bounds."""
+    if not state.due:
+        return MAX_SLEEP_SECONDS
+    wait = min(state.due.values()) - time.time()
+    return max(MIN_SLEEP_SECONDS, min(MAX_SLEEP_SECONDS, wait))
+
+
+def _poll_once(loop, state, labels, rebuild_loop):
+    """One pass over every adapter, reading whichever batteries are due."""
+    for adapter in ADAPTERS:
+        if shutdown_event.is_set():
+            return
+        _poll_adapter(loop, state, labels, rebuild_loop, adapter)
+
+
+def _poll_adapter(loop, state, labels, rebuild_loop, adapter):
+    now = time.time()
+    on_adapter = batteries_on(ENTRIES, adapter)
+    health = adapter_health[adapter]
+
+    due = []
+    for name, entry in on_adapter.items():
+        if state.due[name] > now:
+            continue
+        if _released_until(name) is not None:
+            # Handed to the phone app: drop the link and leave it alone.
+            loop.run_until_complete(bms_driver.drop_session(name, log=log))
+            state.due[name] = now + battery_interval(entry, POLLING)
+            continue
+        if entry["health_gated"] and not health.is_quiet(POLLING["health_gate_minutes"]):
+            since = health.seconds_since_fault() or 0
+            log(f"[{name}] skipped — {_adapter_label(adapter)} had a fault "
+                f"{since / 60:.0f} min ago (gate: {POLLING['health_gate_minutes']} min)")
+            telemetry.write("skip_health_gate", name, {"seconds_since_fault": int(since)})
+            state.due[name] = now + battery_interval(entry, POLLING)
+            continue
+        due.append(name)
+
+    if not due:
+        return
+
+    # One scan for the whole adapter, not one per battery.
+    wanted = [on_adapter[n]["address"] for n in due]
+    sightings = loop.run_until_complete(
+        bms_driver.scan(wanted, adapter=adapter, timeout=POLLING["scan_timeout"], log=log)
+    )
+
+    heard = set()
+    results = {}
+    for name in due:
+        if shutdown_event.is_set():
+            return
+        entry = on_adapter[name]
+        sighting = sightings.get(entry["address"].upper())
+        if sighting is None:
+            log(f"[{name}] not advertising ({entry['address']})")
+            results[name] = None
+            continue
+        heard.add(name)
+        state.last_seen[name] = time.time()
+        reading, stack_error = _fetch_with_retry(
+            loop, name, entry, sighting.device, battery_attempts(entry, POLLING)
+        )
+        results[name] = reading
+        if reading:
+            reading["rssi"] = sighting.rssi
+        if stack_error:
+            rebuild_loop(stack_error)
+            return
+
+    _record_results(state, labels, results, adapter)
+    _detect_outage(state, health, due, heard, adapter)
+    _maybe_recover(loop, state, health, adapter)
+    _maybe_identity_check(loop, state, due, heard, adapter)
+
+
+def _record_results(state, labels, results, adapter):
+    now = time.time()
+    with update_lock:
+        for name, result in results.items():
+            entry = ENTRIES[name]
+            interval = battery_interval(entry, POLLING)
+            if result:
+                result["label"] = labels.get(name, name)
+                # Rated capacity is config, not battery data, so it is merged here
+                # alongside the label rather than inside the driver.
+                result["rated_ah"] = bms_driver.rated_capacity(entry, result)
+                result["last_seen"] = now
+                result["misses"] = 0
+                result["adapter"] = adapter or "default"
+                latest_data[name] = result
+                state.misses[name] = 0
+                telemetry.write("reading", name, {
+                    k: result.get(k) for k in
+                    ("voltage", "current", "soc", "capacity_ah", "temperature",
+                     "problem", "problem_code", "rssi")
+                })
+            else:
+                state.misses[name] += 1
+                if name in latest_data:
+                    latest_data[name]["misses"] = state.misses[name]
+                telemetry.write("miss", name, {"consecutive": state.misses[name]})
+            factor = state.schedule_next(
+                name, interval, failed=not result,
+                backoff_cap_minutes=POLLING["backoff_max_minutes"],
+            )
+            if not result and factor > 1.0:
+                log(f"[{name}] backing off {factor:.0f}x → next read in "
+                    f"{interval * factor / 60:.1f} min")
+
+
+def _detect_outage(state, health, due, heard, adapter):
+    """Flag a whole-adapter scan outage: every battery we expected went silent at once.
+
+    This is the signature that preceded the ECO-WORTHY's death, and it is
+    qualitatively different from one battery missing. Only batteries seen recently
+    count, so a battery that is genuinely gone cannot keep re-triggering it.
+    """
+    expected = [
+        n for n in due
+        if state.last_seen[n] and
+        time.time() - state.last_seen[n] < POLLING["recover_stale_minutes"] * 60
+    ]
+    if len(expected) >= 2 and not heard.intersection(expected):
+        health.note("outage", detail=f"{len(expected)} batteries silent in one scan")
+        telemetry.write("adapter_outage", "-", {
+            "adapter": adapter or "default", "batteries": expected,
+        })
+
+
+def _maybe_recover(loop, state, health, adapter):
+    """Power-cycle the adapter only when the adapter itself looks wedged.
+
+    Two guards that the previous version lacked, both learned the hard way:
+
+    * **A quorum, and only of batteries that were recently alive.** A battery unseen
+      for longer than ``recover_stale_minutes`` ages out. Without that, one genuinely
+      dead battery plus one flaky one kept the adapter power-cycling every few minutes
+      indefinitely — and every one of those cycles is a chance to strand a peripheral.
+    * **Never on a single battery.** One battery missing means that battery is
+      missing. No adapter reset has ever fixed a dead battery, and on a dedicated
+      single-battery adapter this rule means recovery can never fire at all.
+    """
+    now = time.time()
+    on_adapter = batteries_on(ENTRIES, adapter)
+    threshold = POLLING["recover_after_misses"]
+    stale_after = POLLING["recover_stale_minutes"] * 60
+
+    candidates = [
+        n for n in on_adapter
+        if state.last_seen[n] and now - state.last_seen[n] < stale_after
+    ]
+    if len(candidates) < 2:
+        return
+    missing = [n for n in candidates if state.misses[n] >= threshold]
+    if len(missing) < len(candidates):
+        return
+
+    cooldown = POLLING["recover_cooldown_minutes"] * 60
+    if now - health.last_recovery_attempt < cooldown:
+        return
+
+    log(f"[recovery] {_adapter_label(adapter)}: all {len(candidates)} recently-seen "
+        f"batteries missing {threshold}+ reads — recovering")
+    health.last_recovery_attempt = time.time()
+    health.note("recovery", detail=f"{len(missing)} batteries missing")
+    telemetry.write("recovery", "-", {"adapter": adapter or "default", "batteries": missing})
+
+    addresses = [e["address"] for e in on_adapter.values()]
+    if _recover_adapter(loop, adapter, addresses):
+        health.recovery_count += 1
+        for name in on_adapter:
+            state.misses[name] = 0
+            state.failures[name] = 0
+            state.due[name] = time.time()
+        with update_lock:
+            for name in on_adapter:
+                if name in latest_data:
+                    latest_data[name]["misses"] = 0
+
+
+def _maybe_identity_check(loop, state, due, heard, adapter):
+    """After a battery has been missing a while, look at *everything* advertising.
+
+    An address-filtered scan cannot tell "this battery is silent" from "this battery is
+    advertising under a different address or name" — and these modules use random
+    static addresses assigned in firmware and ship under several brand names. One
+    unfiltered scan settles it, and costs one scan window per hour at most.
+    """
+    for name in due:
+        if name in heard:
+            continue
+        last = state.last_seen[name]
+        if not last or time.time() - last < 600:
+            continue
+        if time.time() - state.last_unfiltered_scan[name] < 3600:
+            continue
+        state.last_unfiltered_scan[name] = time.time()
+        log(f"[{name}] missing for {(time.time() - last) / 60:.0f} min — "
+            f"running one unfiltered scan to check for a changed address")
+        rows = loop.run_until_complete(
+            bms_driver.scan_all(adapter=adapter, timeout=POLLING["scan_timeout"], log=log)
+        )
+        for address, dev_name, rssi, uuids in rows:
+            log(f"[{name}]   heard {address} {dev_name or '(no name)'} rssi={rssi}")
+        telemetry.write("unfiltered_scan", name, {
+            "heard": [{"address": r[0], "name": r[1], "rssi": r[2]} for r in rows],
+        })
+        return  # one per cycle is plenty
 
 
 # Sample batteries used by --demo mode. They tell a complete story at a glance:
@@ -381,7 +781,7 @@ DEMO_BATTERIES = {
         "chrg_mosfet": True, "dischrg_mosfet": True, "balancer": False,
         "temps": [22.0],
     },
-    # A second protocol, so the demo also covers the fields JBD does *not* report and
+    # A second protocol, so the demo also covers the fields JBD does not report and
     # the ones it does not: SoH present, cycle count absent, and a healthy pack sitting
     # above its rated capacity (sold as 50 Ah, reports 52 Ah full).
     "utility_50ah": {
@@ -407,6 +807,8 @@ def demo_updater():
     but never touches BLE. last_seen is refreshed every cycle so the cards always
     read as fresh rather than going stale. Used by `--demo` / BMS_DEMO_MODE.
     """
+    with health_lock:
+        adapter_health[None] = AdapterHealth(None)
     while True:
         now = time.time()
         with update_lock:
@@ -414,6 +816,7 @@ def demo_updater():
                 entry = dict(base)
                 entry["last_seen"] = now
                 entry["misses"] = 0
+                entry["adapter"] = "default"
                 latest_data[name] = entry
         time.sleep(5)
 
@@ -438,9 +841,29 @@ def api_data():
         deadline = _released_until(name)
         entry["released"] = deadline is not None
         entry["release_seconds_left"] = int(deadline - now) if deadline else 0
-        entry["releasable"] = bool(ENTRIES.get(name, {}).get("persistent"))
+        # Every configured battery can be released, not just persistent ones. Even a
+        # connect-per-read battery is briefly connected, and these modules take one
+        # client at a time — so a release is still what guarantees the phone app a
+        # clear window.
+        entry["releasable"] = name in ENTRIES
 
     return jsonify(snapshot)
+
+
+@app.route("/api/health")
+def api_health():
+    """Adapter-level health, kept separate from /api/data.
+
+    /api/data is keyed by battery id and consumers iterate its keys, so adapter state
+    cannot live there without breaking them.
+    """
+    with health_lock:
+        snapshot = [h.snapshot() for h in adapter_health.values()]
+    return jsonify({
+        "adapters": snapshot,
+        "library": bms_driver.library_version(),
+        "held_links": bms_driver.held_session_names(),
+    })
 
 
 @app.route("/api/ble/release", methods=["POST"])
@@ -466,7 +889,7 @@ def api_release():
     deadline = time.time() + minutes * 60
     with release_lock:
         release_until[name] = deadline
-    print(f"[release] {name} released for {minutes:.0f} min")
+    log(f"[release] {name} released for {minutes:.0f} min")
 
     return jsonify({"battery": name, "released_until": deadline, "minutes": minutes})
 
@@ -481,7 +904,7 @@ def api_resume():
 
     with release_lock:
         release_until.pop(name, None)
-    print(f"[release] {name} resumed")
+    log(f"[release] {name} resumed")
 
     return jsonify({"battery": name, "released_until": None})
 
@@ -515,7 +938,7 @@ def main():
         # without unwinding — so `finally` blocks never run and BLE links are dropped
         # with the peripheral never told. Give the poll thread a moment to close them.
         def _shutdown(signum, _frame):
-            print(f"[shutdown] signal {signum} — closing BLE links")
+            log(f"[shutdown] signal {signum} — closing BLE links")
             shutdown_event.set()
             shutdown_done.wait(timeout=15)
             raise SystemExit(0)
@@ -525,9 +948,9 @@ def main():
 
     display_host = "127.0.0.1" if host == "0.0.0.0" else host
     if demo:
-        print("DEMO MODE — showing sample batteries, no Bluetooth required.")
-    print(f"Dashboard running at http://{display_host}:{port}")
-    print("Keep this terminal open while using the dashboard.")
+        log("DEMO MODE — showing sample batteries, no Bluetooth required.")
+    log(f"Dashboard running at http://{display_host}:{port}")
+    log("Keep this terminal open while using the dashboard.")
 
     app.run(host=host, port=port, debug=False)
 

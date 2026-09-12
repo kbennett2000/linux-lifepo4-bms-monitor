@@ -1,0 +1,28 @@
+# Rotating HCI capture for diagnosing BLE failures.
+#
+#   sudo cp tools/btmon-ring.sh /usr/local/bin/btmon-ring.sh
+#   sudo cp tools/btmon-ring.service /etc/systemd/system/
+#   sudo systemctl enable --now btmon-ring
+#
+# Read a capture back with:  btmon -r /var/log/btmon/hci-<stamp>.btsnoop
+# What to look for after a battery goes silent: see tools/README.md.
+
+[Unit]
+Description=Rotating Bluetooth HCI capture (btmon)
+After=bluetooth.service
+Wants=bluetooth.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/btmon-ring.sh
+Environment=BTMON_DIR=/var/log/btmon
+Environment=BTMON_KEEP_HOURS=168
+Environment=BTMON_ROTATE_SECONDS=3600
+Restart=always
+RestartSec=10
+# btmon needs to open the HCI monitor socket.
+AmbientCapabilities=CAP_NET_RAW CAP_NET_ADMIN
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

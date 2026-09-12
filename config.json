@@ -35,7 +35,20 @@
       "protocol": "ecoworthy",
       "label": "ECO-WORTHY",
       "rated_capacity_ah": 50,
-      "persistent": true
+      "persistent": false,
+      "interval_seconds": 600,
+      "attempts": 1,
+      "health_gated": true
     }
+  },
+  "polling": {
+    "interval_seconds": 30,
+    "attempts": 2,
+    "scan_timeout": 8.0,
+    "recover_after_misses": 3,
+    "recover_cooldown_minutes": 30,
+    "recover_stale_minutes": 60,
+    "health_gate_minutes": 15,
+    "backoff_max_minutes": 10
   }
 }

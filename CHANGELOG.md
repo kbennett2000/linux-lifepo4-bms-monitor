@@ -7,6 +7,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **The ECO-WORTHY no longer holds its BLE connection open** on a shared adapter, reversing the
+  main decision of [ADR 0002](docs/adr/0002-ecoworthy-persistent-connection.md). That change did
+  not work: the battery died again 48 hours later. The journal shows the held link survived four
+  `bluetoothd` crashes and died at the first whole-adapter scan outage, while it happened to be
+  open. What matters on this hardware is how much of the time a link is open when the adapter
+  wedges, not how often it is closed. It now reads once every 10 minutes, with one attempt, and
+  sits out for 15 minutes after any adapter-level fault. On a *dedicated* adapter the opposite is
+  right and `persistent: true` should be restored — see
+  [ADR 0003](docs/adr/0003-ecoworthy-link-exposure.md), including what evidence would reverse it.
+- **One scan per adapter per cycle, and a battery is only connected to if it actually
+  advertised.** `find_device_by_address` on BlueZ returns cached device objects on any D-Bus
+  property change — including the burst a restarting `bluetoothd` emits for every device it
+  reloads — so it happily hands back a battery that has been silent for hours. Connecting to one
+  of those preceded two of the daemon crashes.
+- **Default poll interval 10 s → 30 s**, matching the reference deployment of these drivers.
+  Combined with the shared scan, this is a large reduction in continuous adapter load.
+- **Adapter recovery requires the adapter to look wedged.** All recently-seen batteries on it
+  must be missing, at least two of them, and any battery unseen for an hour ages out. Cooldown
+  5 → 30 minutes. Previously a battery that was permanently dead counted toward the quorum
+  forever, so one dead pack plus one flaky one power-cycled the adapter 21 times in a day.
+- Recovery now brings links down and **verifies they are down** before power-cycling, and checks
+  by scanning that the adapter is hearing anything afterwards. The USB re-enumeration escalation
+  had never actually run, because the code accepted the library's own optimistic report.
+- Teardown no longer calls `stop_notify` before `Disconnect`. Subscriptions do not persist across
+  connections for an unbonded peer, so it achieved nothing, and it is the likely trigger for the
+  known BlueZ 5.85 use-after-free in GATT client teardown (LP #2164630).
+- Normal teardown no longer resets the negotiated GATT write mode; only teardown after a failure
+  does. This halves the write traffic and timeout ladder on every healthy read.
+- `requirements.txt` now needs `aiobmsble>=0.28.0` for its hard connect timeout and operation
+  lock. The driver layer detects both the old and new constructor styles, so an older install
+  keeps working.
+
+### Fixed
+- **All logging is flushed.** Python block-buffers `print()` to a pipe, so log lines sat in the
+  process for hours and were lost when it was killed. This did not merely lose detail: it hid
+  2,678 adapter power-cycles behind five timestamps and produced a confidently wrong diagnosis.
+  The documented systemd unit also sets `PYTHONUNBUFFERED=1`.
+- **The dashboard survives a `bluetoothd` restart.** The Bluetooth library caches D-Bus object
+  paths and the GATT service database per event loop and never notices the daemon leaving the
+  bus, so every battery failed identically until the service was restarted by hand. The poll loop
+  now recognises that state and rebuilds its event loop, which is the only thing that clears it.
+- Teardown is bounded by its own timeout and verified afterwards; a link that will not close is
+  reported loudly instead of silently. Previously teardown sat entirely outside the read timeout,
+  so one hung disconnect could stall the poll thread indefinitely.
+- Per-battery exponential backoff after consecutive failures, so an unreachable battery stops
+  generating a continuous retry storm. Every host-stack crash observed on this system was
+  preceded by minutes of exactly that.
+
+### Added
+- **Per-battery `adapter`**, so a fragile battery can be moved to its own Bluetooth dongle.
+  Scanning, connecting and recovery are all grouped per adapter, and recovery can never fire on
+  a single-battery adapter.
+- **Per-battery `interval_seconds`, `attempts` and `health_gated`**, so one battery can be
+  treated gently without slowing the whole bank.
+- **`GET /api/health`** and an amber banner on the dashboard when an adapter has had a recent
+  fault, so a bad night is visible in the UI rather than only in the journal.
+- **`state/telemetry.jsonl`** — every reading and event, so a battery's last known state
+  survives the failure that made you want it.
+- **`tools/bt_health.py`** — a Bluetooth stack health report (crashes, recoveries, whole-bank
+  outages, kernel wedge lines, per-battery failure rates) for telling a sick host from a sick
+  battery.
+- **`tools/btmon-ring.sh` + `.service`** — a rolling week of HCI captures, with documented
+  instructions on what to read after a battery goes silent.
+- **`tests/`** — unit tests for the failure backoff, the aged recovery quorum, the adapter
+  health gate, host-stack error classification (against the verbatim strings from this system's
+  journal), and the null-vs-zero reading contract.
+
+
 ### Fixed
 - **ECO-WORTHY batteries no longer get their BLE module wedged.** The ECO-WORTHY path was
   writing JBD protocol frames (`dd a5 03 …`) at a BMS that speaks CRC-checked MODBUS, and
