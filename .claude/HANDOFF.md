@@ -136,11 +136,15 @@ The remaining 4 files are documentation/template fixes that have not been staged
 ## Watch Out For
 
 **The dev venv is broken.** `venv/bin/python` resolves to system Python 3.14 but packages are
-installed under `venv/lib/python3.12/site-packages`. To run anything locally, either:
+installed under `venv/lib/python3.12/site-packages`. Worse, `python3.12` is **no longer installed
+on this machine** and `python3` on PATH resolves to the broken venv interpreter (so even
+`python3 -m pip` fails). Use the absolute system interpreter with the venv packages on the path:
 ```bash
-PYTHONPATH=venv/lib/python3.12/site-packages python3 dashboard.py
+PYTHONPATH=venv/lib/python3.12/site-packages /usr/bin/python3 dashboard.py --demo
+PYTHONPATH=venv/lib/python3.12/site-packages /usr/bin/python3 -m unittest discover -s tests
 ```
-or stub the BLE dependencies. Do not assume `source venv/bin/activate && python3 ...` works.
+The packages are pure Python and import fine under 3.14, which is also what the server runs.
+Do not assume `source venv/bin/activate && python3 ...` works.
 
 **`bluetooth-auto-recovery` is NOT installed in the dev venv.** It is only on the server
 (192.168.1.62). The live `recover_adapter()` code path cannot be exercised locally. It was
@@ -161,3 +165,26 @@ server — pushing to the repo on the dev machine does not automatically update 
 **Commit 4b29ada vs. the 4 unstaged files.** The Phase 3 code changes (dashboard.py,
 dashboard.js) are in 4b29ada. The 4 currently unstaged files are docs-only follow-up from the
 doc-auditor pass. They are safe to commit at any time without touching code.
+
+
+---
+
+## Update 2026-09-12
+
+The ECO-WORTHY failed again after the August fix. See
+[ADR 0003](../docs/adr/0003-ecoworthy-link-exposure.md) for the diagnosis; the short version
+is that the trigger is the host's Bluetooth stack (a wedging Realtek combo adapter plus a
+known BlueZ 5.85 crash), not the battery's poll pattern, and holding the link open made the
+exposure worse rather than better.
+
+**Two traps for anyone reading this journal.**
+
+*Timestamps before 2026-09-12 are unreliable.* `print()` was block-buffered, so lines reached
+the journal in bursts when the buffer filled or the process died. 2,678 adapter recoveries
+arrived as five bursts sharing one timestamp each. An earlier analysis of the same journal
+concluded recovery had barely fired, because a `tail -40` in the query silently truncated it.
+Prefer `tools/bt_health.py` over ad-hoc greps; it counts whole windows.
+
+*Nothing is deployed.* The server still runs `683aa39` with the ECO-WORTHY out of its config,
+and its `config.json` has uncommitted local edits. Deploy order and verification are in the
+plan file and in the README's "Keeping the Bluetooth stack healthy" section.
