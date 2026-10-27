@@ -227,7 +227,19 @@ BlueZ on the server is `5.85-4ubuntu0.4`, which contains the GATT teardown crash
 - SSH as `kb` with keys from the dev machine works (`ssh 192.168.1.62`). The login prints a
   long ASCII banner, so strip it before parsing output.
 
-**Batteries in the server's config:** `100ah_Smart` (added 2026-10-27, `A4:C1:37:42:9E:41`),
+**Later the same day (14:54 UTC): the ECO-WORTHY is back in the server's config**, on the
+shared adapter with ADR 0003's settings (`persistent: false`, `interval_seconds: 600`,
+`attempts: 1`, `health_gated: true`). This is the live test of ADR 0003. Its first read
+succeeded. `btmon-ring` is installed and running (`/var/log/btmon/`). If the battery goes
+silent, read the capture as `tools/README.md` describes before changing anything.
+Config before the change: `config.json.2026.10.27-pre-ecoworthy`. A planned second,
+non-Realtek adapter will replace this setup when it arrives (see above).
+
+Deploying `aiobmsble` 0.31 exposed a bug: every read failed with
+`TypeError: type TempSensor doesn't define __round__ method`. It was fixed in `7f108f8`
+(PR #3). The tests use stubs, so check a real read after any `aiobmsble` upgrade.
+
+**Batteries in the server's config:** `ecoworthy` (re-added as above), `100ah_Smart` (added 2026-10-27, `A4:C1:37:42:9E:41`),
 `200ah_01`, `200ah_02`, `330ah`. All JBD. The new 100Ah was invisible until it was moved
 next to the server. Even there its signal is only about -67 dBm, so it will probably drop out
 if it moves back. Its BMS reports 84 Ah full against a 100 Ah rating.
