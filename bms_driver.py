@@ -426,8 +426,10 @@ def sample_to_reading(address: str, data: dict) -> dict:
       it, deriving it from ``problem_code`` plus its own sanity checks, so ``False``
       here means "the BMS says it is fine", not "unknown".
     """
+    # float() first: aiobmsble >= 0.28 returns some values as objects that convert
+    # to float but cannot be passed to round() directly (TempSensor).
     def rounded(value, digits):
-        return None if value is None else round(value, digits)
+        return None if value is None else round(float(value), digits)
 
     cells = [round(v, 3) for v in (data.get("cell_voltages") or [])]
 
@@ -476,7 +478,8 @@ def sample_to_reading(address: str, data: dict) -> dict:
         "dischrg_mosfet": data.get("dischrg_mosfet"),
         "balancer": data.get("balancer"),
         # Individual sensors; `temperature` above is their mean.
-        "temps": [round(v, 1) for v in (data.get("temp_values") or [])],
+        # aiobmsble >= 0.28 gives TempSensor objects here, older versions plain floats.
+        "temps": [round(float(v), 1) for v in (data.get("temp_values") or [])],
     }
 
 
