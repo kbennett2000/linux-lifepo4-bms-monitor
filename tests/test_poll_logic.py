@@ -236,6 +236,25 @@ class ReadingMappingTests(unittest.TestCase):
         self.assertIs(sparse["problem"], False, "problem is a real bool, never None")
         self.assertEqual(sparse["soc"], 55, "soc must stay numeric for the SOC ring")
 
+    def test_temp_sensor_objects_are_rounded_like_floats(self):
+        import bms_driver  # noqa: PLC0415
+
+        # aiobmsble >= 0.28 returns TempSensor objects, which support float() but
+        # not round(). Passing one straight to round() broke every read on 2026-10-27.
+        class FakeTempSensor:
+            def __init__(self, value):
+                self.value = value
+
+            def __float__(self):
+                return float(self.value)
+
+        reading = bms_driver.sample_to_reading("AA:BB", {
+            "battery_level": 50, "temperature": 23.46,
+            "temp_values": [FakeTempSensor(23.46), FakeTempSensor(22.04)],
+        })
+        self.assertEqual(reading["temps"], [23.5, 22.0])
+        self.assertEqual(reading["temperature"], 23.5)
+
     def test_full_sample_matches_the_hardware_gate_reading(self):
         import bms_driver  # noqa: PLC0415
 
