@@ -1,5 +1,10 @@
 # Session Handoff — 2026-05-30
 
+> **Read the dated updates at the bottom first.** Everything above them is the 2026-05-30
+> handoff. Its "Current State" and "Pending" sections are long finished, and its deploy
+> instructions name the wrong path on the server. The latest update has the server's current
+> state.
+
 ## Goal
 
 Stabilize the LiFePO4 BMS dashboard (dashboard.py) so batteries stop disappearing from the UI after
@@ -105,8 +110,8 @@ The remaining 4 files are documentation/template fixes that have not been staged
 
 2. **Deploy to 192.168.1.62.**
    ```bash
-   # on the server
-   cd ~/linux-lifepo4-bms-monitor
+   # on the server (path corrected 2026-10-27 — see the update at the bottom)
+   cd ~/applications/linux-lifepo4-bms-monitor
    git pull
    sudo systemctl restart bms-dashboard
    ```
@@ -185,6 +190,44 @@ arrived as five bursts sharing one timestamp each. An earlier analysis of the sa
 concluded recovery had barely fired, because a `tail -40` in the query silently truncated it.
 Prefer `tools/bt_health.py` over ad-hoc greps; it counts whole windows.
 
-*Nothing is deployed.* The server still runs `683aa39` with the ECO-WORTHY out of its config,
-and its `config.json` has uncommitted local edits. Deploy order and verification are in the
-plan file and in the README's "Keeping the Bluetooth stack healthy" section.
+*Nothing is deployed.* (Superseded — see the 2026-10-27 update.) The server still runs
+`683aa39` with the ECO-WORTHY out of its config, and its `config.json` has uncommitted local
+edits. Deploy order and verification are in the plan file and in the README's "Keeping the
+Bluetooth stack healthy" section.
+
+---
+
+## Update 2026-10-27
+
+**ADR 0003's code is deployed** to 192.168.1.62 (`40cdf36`), and `aiobmsble` there is upgraded
+0.23 → 0.31 to meet the `>=0.28.0` floor. Tests pass on the server. Before this, the server
+was running `3f8f6d1` (not `683aa39`) — the held-connection code from ADR 0002 that failed.
+Check `systemctl show bms-dashboard -p ActiveEnterTimestamp`: if it is earlier than
+2026-10-27 14:44 UTC, the service has not been restarted since and still runs the old code
+in memory.
+
+**The ECO-WORTHY fix is still unproven.** The battery has been out of the server's config
+since August, so the new code has never polled it. It is healthy and advertising, revived on
+the vendor app alone. Kris is looking for a second (non-Realtek) Bluetooth adapter. The plan
+is to put the ECO-WORTHY on it with its own `adapter` setting and `persistent: true`, and
+run `tools/btmon-ring.sh` so a failure leaves a capture. ADR 0003 sets the bar at 60 clean
+days on a dedicated adapter.
+
+BlueZ on the server is `5.85-4ubuntu0.4`, which contains the GATT teardown crash fix
+(`0.2`, LP #2164630).
+
+**Server facts that earlier sections get wrong:**
+
+- The checkout is `~/applications/linux-lifepo4-bms-monitor`, not `~/linux-lifepo4-bms-monitor`.
+- `sudo` on the server needs a password, so a session can deploy but Kris restarts the service.
+- The checkout carries local, uncommitted edits to `config.json` and to tracked `venv/` files.
+  `config.json` changes upstream, so a plain `git pull` conflicts. What worked: copy
+  `config.json` aside, `git checkout -- config.json`, `git pull --ff-only`, copy it back.
+  Dated backups sit next to it (`config.json.2026.10.27` is the latest).
+- SSH as `kb` with keys from the dev machine works (`ssh 192.168.1.62`). The login prints a
+  long ASCII banner, so strip it before parsing output.
+
+**Batteries in the server's config:** `100ah_Smart` (added 2026-10-27, `A4:C1:37:42:9E:41`),
+`200ah_01`, `200ah_02`, `330ah`. All JBD. The new 100Ah was invisible until it was moved
+next to the server. Even there its signal is only about -67 dBm, so it will probably drop out
+if it moves back. Its BMS reports 84 Ah full against a 100 Ah rating.
